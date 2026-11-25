@@ -1,0 +1,46 @@
+GENERADOR DE CORTES  -  Quinta Heeren  (Revit 2023 a 2026 + nube de puntos -> AutoCAD)
+=====================================================================================
+Se abre con DOBLE CLIC en  GENERADOR_DE_CORTES.bat  (ventana; sin consola ni Dynamo).
+
+AL ABRIR (automatico)
+  - Busca los Revit instalados. Si no hay Revit 2023, 2024, 2025 o 2026, avisa y NO abre.
+  - Instala el complemento "Cortes nube" en cada Revit 2023-2026 (compilado para su .NET).
+    La primera vez: cierra Revit (guarda tu trabajo), abrelo y elige "Cargar siempre": queda permanente.
+
+0. (OPCIONAL) LLEVAR LA NUBE A REVIT - solo si tu nube aun no esta en Revit. No hace falta para generar.
+  - "Convertir .las/.laz a .rcp": convierte la nube SIN abrir ReCap (usa DeCap.exe, el conversor de linea de
+    comandos que viene con Autodesk ReCap Pro; necesita la licencia de ReCap Pro activa en la PC). Deja el .rcp y su
+    carpeta de .rcs junto al archivo original y ofrece vincularlo en Revit. Si DeCap no acepta un .laz, primero
+    lo pasa a .las con CloudCompare.
+  - "Vincular en Revit": elige el .rcp/.rcs y el complemento lo vincula solo en tu proyecto abierto
+    (origen a origen interno).
+
+1. EN REVIT, por cada corte, DOS secciones sobre la misma linea:
+  - una CORTA (desfase lejano p. ej. 0.10 m) = LINEA DE CORTE (rojo)
+  - otra LARGA (hasta el fondo)              = vista CON FONDO
+  (Duplicar vista > Duplicar y cambiar solo el desfase lejano.) La vista mira hacia la flecha de la seccion.
+
+2. EN LA VENTANA: los cortes aparecen solos (en vivo). Marca los que quieras.
+   Los cortes salen DE REVIT: el complemento exporta cada seccion tal como se ve (solo la nube, sin
+   anotaciones) y el programa las superpone. Revit tiene que estar ABIERTO con el proyecto. No hacen falta
+   CloudCompare ni elegir nube.
+3. CALIDAD TIFF: ppp y escala (600 ppp a 1:50 = pixel de 2.1 mm; el TIFF lleva grabados los ppp).
+   Pulsa GENERAR CORTES: sale la LISTA DE NOMBRES (botones Letras A,B,C... / Numeros 1,2,3... /
+   Nombres de Revit, o escribe cada uno). Cada corte = su propio DWG: "Corte <nombre>.dwg".
+
+RESULTADO
+  CORTES DWG\Corte <nombre>.dwg : escala real en metros, imagenes INCRUSTADAS y agrupadas (1 clic = 1 imagen; se usa sin los TIFF)
+       arriba: vista con fondo + linea de corte en rojo encima | abajo: solo la seccion en rojo
+  TIFF\Corte_<nombre>_revit_conjunto.tif y _revit_rojo.tif  (georreferenciados, con sus ppp)
+
+NOTAS
+  - Mas calidad = archivos mas pesados (1200 ppp o escala 1:20 hacen DWG muy grandes).
+  - Alto de imagen: el de la seccion en Revit, limitado de -1 a 15 m (Z_TOPE_MIN / Z_TOPE_MAX en el .bat).
+  - Mientras AutoCAD arma el DWG (se abre y se cierra solo) no copies ni pegues nada.
+  - Revit exporta hasta 15000 pixeles de ancho por vista: en cortes muy largos el pixel real sale algo
+    mayor que el elegido (el registro de la ventana lo indica).
+  - Mientras Revit exporta (unos segundos por vista) no lo uses.
+  - El aviso "OLE Text Size" de AutoCAD se desactiva solo.
+
+  Las carpetas TIFF y CORTES DWG se crean solas junto al programa al abrirlo
+  (si copias GENERADOR_DE_CORTES.bat a otra carpeta, se crean alli).
