@@ -1,10 +1,10 @@
 {
- "version": "2026.11.25.1",
- "fecha": "2026-11-25 11:39",
- "notas": "Primera version como app: conversor .las/.laz a .rcp sin abrir ReCap, cortes desde Revit, carpetas TIFF y CORTES DWG, actualizacion automatica.",
+ "version": "2026.11.25.2",
+ "fecha": "2026-11-25 11:50",
+ "notas": "El conversor .las/.laz ahora tambien reconoce cuando ReCap deja solo un .rcs (antes solo buscaba .rcp).",
  "min_lanzador": 1,
  "archivos": {
-  "GENERADOR_DE_CORTES.bat": "dd03c54568b457caebe72149aa74ea915b034226964329760186c211b8477a61",
+  "GENERADOR_DE_CORTES.bat": "884147fa7689d1bf8f622e3330b32a8cb83dcdc6c016fc8e9eaddb0a370ca5f8",
   "LEEME_CORTES_REVIT.txt": "312abd1944643429b224b8b92703578c6a290343f6609a80a92225f13d965fc9"
  }
 }

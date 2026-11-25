@@ -2310,7 +2310,9 @@ function Decap([string]$exe, [string]$salida, [string]$nombre, [string]$nube, [s
     $s = [int]((Get-Date) - $t0).TotalSeconds; $lblPaso.Text = ("Convirtiendo la nube a .rcp ... {0}:{1:00}  (puede tardar varios minutos)" -f [int][math]::Floor($s / 60), ($s % 60))
   }
   try { [IO.File]::WriteAllText($logf, "DeCap $arg`r`n`r`n" + $out.Result + "`r`n" + $err.Result) } catch {}
-  return (Get-ChildItem -LiteralPath $salida -Filter "$nombre*.rcp" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
+  $r = Get-ChildItem -LiteralPath $salida -Filter "$nombre*.rcp" -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $t0.AddSeconds(-5) } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  if (-not $r) { $r = Get-ChildItem -LiteralPath $salida -Recurse -Depth 2 -Include '*.rcp', '*.rcs' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -ge $t0.AddSeconds(-5) } | Sort-Object @{ e = { $_.Extension -eq '.rcp' } } -Descending | Select-Object -First 1 }
+  return $r
 }
 $btnLas.Add_Click({
   $d = New-Object System.Windows.Forms.OpenFileDialog
