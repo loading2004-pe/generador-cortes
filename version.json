@@ -1,10 +1,10 @@
 {
- "version": "2026.11.25.4",
- "fecha": "2026-11-25 22:56",
- "notas": "Nuevo atajo: 'Ya tengo los TIFF: pasar a AutoCAD'. Eliges tus TIFF y sale un DWG por corte a escala real, sin pasar por Revit (si eliges una de las dos imagenes de un corte, la otra se agrega sola).",
+ "version": "2026.11.26.1",
+ "fecha": "2026-11-26 07:10",
+ "notas": "Mas facil: acceso directo en escritorio y menu Inicio, sin dialogo de nombres (usa los de Revit), guia de 3 pasos al abrir, y al terminar ofrece abrir el DWG o la carpeta.",
  "min_lanzador": 1,
  "archivos": {
-  "GENERADOR_DE_CORTES.bat": "a72341b08b69fafed1408fd8bc486b6bbb89e2a4ae284038fe63bc3b7f2054e0",
-  "LEEME_CORTES_REVIT.txt": "3b3e41e78b6f92ec09ddec2c3ab8e5ef1e3ce9ea7448e66031d96c93c30408ab"
+  "GENERADOR_DE_CORTES.bat": "5a90d4dd1ef6d5919e26df8fd3fb7488b1b359a20f61a7396da069c3951b2c30",
+  "LEEME_CORTES_REVIT.txt": "cebf2fe0f5590ba17baabe8339cde7d6f81838084fe6f90a973a4a401a852aa5"
  }
 }

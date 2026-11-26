@@ -1,6 +1,7 @@
 GENERADOR DE CORTES  -  Quinta Heeren  (Revit 2023 a 2026 + nube de puntos -> AutoCAD)
 =====================================================================================
-Se abre con DOBLE CLIC en  GENERADOR_DE_CORTES.bat  (ventana; sin consola ni Dynamo).
+Se abre con DOBLE CLIC en  GeneradorCortes.exe  (o el acceso directo 'Generador de cortes' del escritorio /
+menu Inicio, que se crea solo la primera vez). La primera vez sale una guia rapida de 3 pasos.
 
 AL ABRIR (automatico)
   - Busca los Revit instalados. Si no hay Revit 2023, 2024, 2025 o 2026, avisa y NO abre.
@@ -25,8 +26,9 @@ AL ABRIR (automatico)
    anotaciones) y el programa las superpone. Revit tiene que estar ABIERTO con el proyecto. No hacen falta
    CloudCompare ni elegir nube.
 3. CALIDAD TIFF: ppp y escala (600 ppp a 1:50 = pixel de 2.1 mm; el TIFF lleva grabados los ppp).
-   Pulsa GENERAR CORTES: sale la LISTA DE NOMBRES (botones Letras A,B,C... / Numeros 1,2,3... /
-   Nombres de Revit, o escribe cada uno). Cada corte = su propio DWG: "Corte <nombre>.dwg".
+   Pulsa GENERAR CORTES: ya no pregunta nombres. Cada corte se llama como su seccion de Revit (o una letra);
+   doble clic en la lista para cambiarlo. Cada corte = su propio DWG: "Corte <nombre>.dwg".
+   Al terminar ofrece abrir el DWG en AutoCAD (un corte) o la carpeta CORTES DWG (varios).
 
 RESULTADO
   CORTES DWG\Corte <nombre>.dwg : escala real en metros, imagenes INCRUSTADAS y agrupadas (1 clic = 1 imagen; se usa sin los TIFF)

@@ -2253,8 +2253,8 @@ function Combo($items, $sel, $x, $y, $w) {
 }
 $lblRevit = Etiqueta 'Buscando Revit...' 15 12 760 26 $true
 $lblRevit.Font = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold); $lblRevit.ForeColor = [System.Drawing.Color]::DarkSlateBlue
-$btnAyuda = Boton 'Como hago un corte?' 785 10 190 30
-$lblGuia = Etiqueta 'En Revit haz, por cada corte, DOS secciones sobre la misma linea: una corta (unos 10 cm = linea de corte) y otra hasta el fondo. Aparecen aqui solas.' 15 42 960 22 $false
+$btnAyuda = Boton 'Guia / como hago un corte' 785 10 190 30
+$lblGuia = Etiqueta 'Marca los cortes y pulsa GENERAR. El nombre es el de la seccion de Revit (doble clic para cambiarlo). Guia: boton de arriba a la derecha.' 15 42 960 22 $false
 $lblGuia.ForeColor = [System.Drawing.Color]::DimGray
 $lista = New-Object System.Windows.Forms.ListView
 $lista.Location = New-Object System.Drawing.Point(15, 68); $lista.Size = New-Object System.Drawing.Size(960, 300)
@@ -2413,11 +2413,19 @@ function CargarRevit {
   catch { $lblRevit.Text = "No se pudieron leer las secciones: $($_.Exception.Message)"; return }
   $lblRevit.Text = ("{0}  -  proyecto: {1}  -  nube: {2}  -  {3} corte(s)" -f $txtRevit, $proy, $nube, $script:pares.Count)
   if ($nube -eq 'SIN NUBE VINCULADA') { $lblRevit.ForeColor = [System.Drawing.Color]::Firebrick } else { $lblRevit.ForeColor = [System.Drawing.Color]::DarkSlateBlue }
-  $nom = LeerNombres
+  $nom = LeerNombres; $usados = @{}; $idx = 0
+  foreach ($p in $script:pares) { $n0 = $nom[$p.Clave]; if ($n0) { $usados[$n0.ToUpperInvariant()] = 1 } }
   foreach ($p in $script:pares) {
     $n = $nom[$p.Clave]
+    if (-not $n) {
+      # sin pedir nombres: se usa el nombre de la seccion de Revit (o una letra), sin repetir
+      $base = [string]$p.Sugerido; if (-not $base) { $base = Letra $idx }
+      $n = $base; $j = 2; while ($usados.ContainsKey($n.ToUpperInvariant())) { $n = "$base ($j)"; $j++ }
+      $usados[$n.ToUpperInvariant()] = 1
+    }
+    $idx++
     $k = if ($p.Fondo) { $p.Fondo } else { $p.Rojo }
-    $it = New-Object System.Windows.Forms.ListViewItem($(if ($n) { $n } else { '(sin nombre)' }))
+    $it = New-Object System.Windows.Forms.ListViewItem($n)
     [void]$it.SubItems.Add($p.Secciones); [void]$it.SubItems.Add(('{0:N2}' -f $k.Largo))
     [void]$it.SubItems.Add(('{0:N2}{1}' -f $p.Rojo.Fondo, $(if ($p.RojoAuto) { ' (auto)' } else { '' })))
     [void]$it.SubItems.Add($(if ($p.Fondo) { '{0:N2}' -f $p.Fondo.Fondo } else { '-' }))
@@ -2536,6 +2544,49 @@ function ArmarDwg([string[]]$nombres, [string]$imgDir, [double]$px) {
 
 # Atajo: TIFF que ya tienes -> DWG (sin Revit). Los Corte_<n>_revit_conjunto/_rojo se juntan en un DWG por corte;
 # cualquier otro TIFF va solo en su propio DWG (si no esta georreferenciado se escala con sus ppp y la escala elegida).
+# al terminar: abrir el DWG (un corte) o la carpeta CORTES DWG (varios)
+function OfrecerAbrir([string[]]$hechos) {
+  $hechos = @($hechos | Where-Object { $_ }); if (-not $hechos.Count) { return }
+  if ($hechos.Count -eq 1) {
+    $f = Join-Path $DwgDir "Corte $($hechos[0]).dwg"
+    if ((Test-Path -LiteralPath $f) -and [System.Windows.Forms.MessageBox]::Show("Listo: Corte $($hechos[0]).dwg`n`nQuieres abrirlo ahora en AutoCAD?", 'Generador de cortes', 'YesNo', 'Question') -eq 'Yes') { Start-Process -FilePath $f }
+  } elseif ([System.Windows.Forms.MessageBox]::Show("Listos $($hechos.Count) cortes en DWG.`n`nQuieres abrir la carpeta CORTES DWG?", 'Generador de cortes', 'YesNo', 'Question') -eq 'Yes') { Start-Process explorer.exe -ArgumentList ('"' + $DwgDir + '"') }
+}
+# acceso directo en el escritorio y en el menu Inicio (solo si se abrio desde GeneradorCortes.exe)
+function CrearAccesos {
+  if (-not $env:CN_LANZADOR) { return }
+  $exe = Get-ChildItem -LiteralPath $Root -Filter 'GeneradorCortes*.exe' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  if (-not $exe) { return }
+  $sh = New-Object -ComObject WScript.Shell; $nuevos = @()
+  foreach ($c in [Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs')) {
+    if (-not $c) { continue }
+    $l = Join-Path $c 'Generador de cortes.lnk'
+    try {
+      if ((Test-Path -LiteralPath $l) -and ($sh.CreateShortcut($l).TargetPath -eq $exe.FullName)) { continue }
+      $a = $sh.CreateShortcut($l); $a.TargetPath = $exe.FullName; $a.WorkingDirectory = $Root; $a.IconLocation = $exe.FullName + ',0'
+      $a.Description = 'Generador de cortes: secciones de Revit + nube de puntos a DWG'; $a.Save(); $nuevos += $c
+    } catch { Log "AVISO: no se pudo crear el acceso directo en $c ($($_.Exception.Message))" }
+  }
+  if ($nuevos.Count) { Log "Acceso directo 'Generador de cortes' creado en el escritorio y el menu Inicio." }
+}
+# guia de 3 pasos (la primera vez, y desde el boton de ayuda)
+function MostrarGuia {
+  [System.Windows.Forms.MessageBox]::Show(
+    "COMO SE USA (3 pasos)`n`n" +
+    "1. ABRE REVIT con tu proyecto y la nube vinculada.`n" +
+    "    Esta ventana lo detecta sola: arriba veras 'Revit abierto - proyecto - nube - N cortes'.`n`n" +
+    "2. HAZ TUS SECCIONES en Revit (Vista > Seccion). Aparecen solas en la lista.`n" +
+    "    El nombre de cada corte es el de la seccion de Revit (doble clic para cambiarlo).`n`n" +
+    "3. PULSA 'GENERAR CORTES'. El programa saca las imagenes de la nube (carpeta TIFF)`n" +
+    "    y arma el DWG a escala real (carpeta CORTES DWG). Al terminar te ofrece abrirlo.`n`n" +
+    "Si ya tienes los TIFF: boton 'Ya tengo los TIFF: pasar a AutoCAD'.`n`n" +
+    "IMPORTANTE:`n" +
+    " - No toques AutoCAD mientras arma el DWG (se abre y cierra solo).`n" +
+    " - La primera vez, cierra y vuelve a abrir Revit para cargar el complemento ('Cargar siempre').`n" +
+    " - Si arriba sale 'SIN NUBE VINCULADA', vincula la nube en Revit o usa Herramientas.",
+    'Generador de cortes - guia rapida', 'OK', 'Information') | Out-Null
+}
+
 function TiffACad {
   if (-not $AUTOCAD) { throw 'No encuentro AutoCAD instalado.' }
   $d = New-Object System.Windows.Forms.OpenFileDialog
@@ -2575,12 +2626,14 @@ function TiffACad {
     $barra.Value = $barra.Maximum
     Paso ("TERMINADO: {0} de {1} DWG en la carpeta CORTES DWG." -f $ok.Count, $nombres.Count)
     [System.Media.SystemSounds]::Asterisk.Play()
+    $script:abrirLuego = $ok
   } catch { Log "ERROR: $($_.Exception.Message)"; Paso 'No se pudo terminar. Revisa los mensajes.' }
   finally {
     foreach ($c in $btnGen, $btnTiff, $lista, $btnHerr) { $c.Enabled = $true }
     $script:trabajando = $false
     Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
   }
+  if ($script:abrirLuego) { $x = $script:abrirLuego; $script:abrirLuego = $null; OfrecerAbrir $x }
 }
 
 function Generar {
@@ -2588,9 +2641,8 @@ function Generar {
   if ($sel.Count -eq 0) { [System.Windows.Forms.MessageBox]::Show('Marca al menos un corte en la lista.', 'Generador de cortes') | Out-Null; return }
   if (-not $AUTOCAD) { throw 'No encuentro AutoCAD instalado.' }
   foreach ($d in $TifDir, $DwgDir, $Tmp, $Png) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
-  $nombres = PedirNombres $sel
-  if (-not $nombres) { Paso 'Cancelado.'; return }
-  for ($i = 0; $i -lt $sel.Count; $i++) { GuardarNombre $sel[$i].Tag.Clave $nombres[$i]; $sel[$i].Text = $nombres[$i] }
+  # los nombres salen de Revit (doble clic en la lista para cambiarlos); se guardan para la proxima vez
+  foreach ($it in $sel) { GuardarNombre $it.Tag.Clave $it.Text }
   $px = PixelElegido; $ppp = [double]$cmbPpp.SelectedItem
   $pasoRojo = [math]::Min(0.001, $px)
   Log ("Calidad: {0} ppp a 1:{1}  ->  pixel {2:N2} mm" -f $ppp, $cmbEsc.SelectedItem, ($px * 1000))
@@ -2653,12 +2705,14 @@ function Generar {
     }
   }
   $barra.Value = $barra.Maximum
-  Paso 'TERMINADO. Abre la carpeta CORTES DWG con el boton de abajo.'
+  Paso ("TERMINADO: {0} DWG en la carpeta CORTES DWG." -f $hechos.Count)
   [System.Media.SystemSounds]::Asterisk.Play()
+  OfrecerAbrir $hechos
 }
 
 # ============================== EVENTOS ==============================
 $btnAyuda.Add_Click({
+  MostrarGuia
   [System.Windows.Forms.MessageBox]::Show(
     "COMO HACER UN CORTE EN REVIT`n`n" +
     "1. En la planta donde se ve la nube: Vista > Seccion. Clic en el inicio y en el final del corte.`n" +
@@ -2667,14 +2721,14 @@ $btnAyuda.Add_Click({
     "3. Haz OTRA seccion sobre la MISMA linea (copia la primera) y ponle un desfase lejano grande`n" +
     "   (hasta el fondo que quieras ver): esta es la vista CON FONDO.`n" +
     "4. Las dos secciones aparecen solas en esta ventana como UN corte.`n" +
-    "5. Pulsa GENERAR CORTES: te pedira el nombre y hara el DWG a escala real.`n`n" +
+    "5. Pulsa GENERAR CORTES: usa el nombre de la seccion y hace el DWG a escala real.`n`n" +
     "Si solo haces una seccion larga, la linea de corte se saca sola con 10 cm.`n" +
     "La flecha de la seccion manda: la vista mira hacia donde mira la seccion en Revit.", 'Como hago un corte?', 'OK', 'Information') | Out-Null
 })
 $lista.Add_DoubleClick({
   if ($script:trabajando -or -not $lista.SelectedItems.Count) { return }
   $it = $lista.SelectedItems[0]; $p = $it.Tag
-  $n = PedirNombre $p $(if ($it.Text -ne '(sin nombre)') { $it.Text } else { '' })
+  $n = PedirNombre $p $it.Text
   if ($n) { GuardarNombre $p.Clave $n; $it.Text = $n; $it.Checked = -not (YaHecho $p $n); $it.SubItems[5].Text = $(if (YaHecho $p $n) { "Ya generado: Corte $n.dwg" } else { 'Nuevo / cambiado: se generara' }) }
 })
 $btnReinst.Add_Click({
@@ -2824,7 +2878,10 @@ $form.Add_Shown({
     }
     foreach ($e in $r.Errores) { if ($e -like '(info)*') { Log $e.Substring(7) } else { Log "AVISO complemento: $e" } }
   } catch { Log "AVISO complemento: $($_.Exception.Message)" }
+  try { CrearAccesos } catch { Log "AVISO acceso directo: $($_.Exception.Message)" }
   CargarRevit
+  $guia = Join-Path $Tmp 'guia_vista.txt'
+  if (-not (Test-Path -LiteralPath $guia)) { MostrarGuia; try { New-Item -ItemType Directory -Force -Path $Tmp | Out-Null; Set-Content -LiteralPath $guia -Value (Get-Date) } catch {} }
   $reloj.Start()
 })
 [void]$form.ShowDialog()
