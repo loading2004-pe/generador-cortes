@@ -44,3 +44,9 @@ NOTAS
 
   Las carpetas TIFF y CORTES DWG se crean solas junto al programa al abrirlo
   (si copias GENERADOR_DE_CORTES.bat a otra carpeta, se crean alli).
+
+ATAJO: "Ya tengo los TIFF: pasar a AutoCAD"
+  - Eliges uno o varios TIFF y sale un DWG por corte en CORTES DWG (escala real, imagen incrustada y agrupada).
+  - Los TIFF del generador (Corte_<nombre>_revit_conjunto / _rojo) se juntan solos: basta elegir uno de los dos.
+  - Cualquier otro TIFF va en su propio DWG. Si no trae georreferencia se escala con sus ppp y la escala elegida
+    (Calidad: ppp a 1:escala); el registro avisa con que tamano de pixel se escalo.

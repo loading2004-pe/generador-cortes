@@ -59,8 +59,21 @@ public static class CNPrep
         public int W, H, Spp = 1, Bps = 8, Rps = int.MaxValue, Comp = 1, Planar = 1, Pred = 1, Extra = 0;
         public long[] Off, Cnt;
         public bool Big, Le = true, Geo, Tiled;
-        public double Sx, Sy, U0, V0;
+        public double Sx, Sy, U0, V0, Dpi;
+        public int ResUnit = 2;
         public string Path;
+    }
+    // TIFF sin georreferencia (p. ej. exportado de otro programa): escala con sus ppp y esta escala (1:Escala);
+    // si tampoco trae ppp, se usa PxSinGeo (m por pixel). Origen en (0,0) = esquina inferior izquierda.
+    public static double Escala = 50, PxSinGeo = 0;
+    public static List<string> SinGeo = new List<string>();
+    static double Racional(FileStream fs, Tif t, byte[] e, int vo, int vlen)
+    {
+        byte[] d;
+        if (vlen >= 8) { d = new byte[8]; Array.Copy(e, vo, d, 0, 8); }
+        else { long at = (long)Rd(e, vo, vlen, t.Le); d = ReadAt(fs, at, 8); }
+        double num = (double)Rd(d, 0, 4, t.Le), den = (double)Rd(d, 4, 4, t.Le);
+        return den > 0 ? num / den : 0;
     }
 
     public class Tile
@@ -160,6 +173,8 @@ public static class CNPrep
                     case 278: t.Rps = (int)Math.Min(int.MaxValue, Values(fs, t, type, 1, e, vo, vlen)[0]); break;
                     case 279: t.Cnt = Values(fs, t, type, cnt, e, vo, vlen); break;
                     case 284: t.Planar = (int)Values(fs, t, type, 1, e, vo, vlen)[0]; break;
+                    case 282: if (type == 5) t.Dpi = Racional(fs, t, e, vo, vlen); break;
+                    case 296: t.ResUnit = (int)Values(fs, t, type, 1, e, vo, vlen)[0]; break;
                     case 317: t.Pred = (int)Values(fs, t, type, 1, e, vo, vlen)[0]; break;
                     case 322: case 323: case 324: case 325: t.Tiled = true; break;
                     case 338: t.Extra = (int)cnt; break;
@@ -174,7 +189,15 @@ public static class CNPrep
         if (t.Spp < 3) throw new Exception("El TIFF no tiene color RGB. En CloudCompare marca 'Export RGB colors'.");
         if (t.Comp != 1 && t.Comp != 5 && t.Comp != 8 && t.Comp != 32946 && t.Comp != 32773)
             throw new Exception("Compresion TIFF no soportada (" + t.Comp + ").");
-        if (!t.Geo || t.Sx <= 0) throw new Exception("El TIFF no trae georreferencia (tamano de pixel y origen). Exportalo desde CloudCompare > Rasterize > Raster.");
+        if (!t.Geo || t.Sx <= 0)
+        {
+            double dpi = t.Dpi > 1 ? (t.ResUnit == 3 ? t.Dpi * 2.54 : t.Dpi) : 0;
+            double px = (dpi > 1 && Escala > 0) ? 0.0254 / dpi * Escala : PxSinGeo;
+            if (px <= 0) throw new Exception("El TIFF no trae georreferencia ni resolucion (ppp): no se puede saber su escala. " + System.IO.Path.GetFileName(path));
+            t.Sx = t.Sy = px; t.U0 = 0; t.V0 = t.H * px; t.Geo = true;
+            string av = System.IO.Path.GetFileName(path) + ": sin georreferencia; escala por " + (dpi > 1 ? ((int)Math.Round(dpi)) + " ppp a 1:" + Escala : "pixel elegido") + " = pixel " + (px * 1000).ToString("0.##", CultureInfo.InvariantCulture) + " mm";
+            if (!SinGeo.Contains(av)) SinGeo.Add(av);
+        }
         if (t.Sy <= 0) t.Sy = t.Sx;
         if (t.Rps > t.H) t.Rps = t.H;
         return t;
@@ -2258,7 +2281,9 @@ foreach ($par in @(@('Convertir nube .las / .laz a .rcp (para Revit)', $btnLas),
   [void]$menuHerr.Items.Add($mi)
 }
 $btnHerr.Add_Click({ $menuHerr.Show($btnHerr, (New-Object System.Drawing.Point(0, $btnHerr.Height))) })
-$btnGen = Boton 'GENERAR CORTES' 15 414 960 56
+$btnGen = Boton 'GENERAR CORTES  (desde Revit)' 15 414 690 56
+$btnTiff = Boton 'Ya tengo los TIFF: pasar a AutoCAD' 715 414 260 56
+$btnTiff.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
 $btnGen.Font = New-Object System.Drawing.Font('Segoe UI', 14, [System.Drawing.FontStyle]::Bold)
 $btnGen.BackColor = [System.Drawing.Color]::FromArgb(46, 139, 87); $btnGen.ForeColor = [System.Drawing.Color]::White; $btnGen.FlatStyle = 'Flat'
 $barra = New-Object System.Windows.Forms.ProgressBar
@@ -2273,7 +2298,7 @@ $btnTif = Boton 'Abrir carpeta TIFF' 15 728 220 36
 $btnDwg = Boton 'Abrir carpeta CORTES DWG' 245 728 220 36
 $btnSalir = Boton 'Cerrar' 855 728 120 36
 foreach ($c in $lista, $btnGen, $barra, $lblPaso, $lblRevit) { $c.Anchor = 'Top, Left, Right' }
-foreach ($c in $btnAyuda, $btnHerr) { $c.Anchor = 'Top, Right' }; $lblGuia.Anchor = 'Top, Left, Right'; $log.Anchor = 'Top, Bottom, Left, Right'
+foreach ($c in $btnAyuda, $btnHerr, $btnTiff) { $c.Anchor = 'Top, Right' }; $lblGuia.Anchor = 'Top, Left, Right'; $log.Anchor = 'Top, Bottom, Left, Right'
 foreach ($c in $btnTif, $btnDwg) { $c.Anchor = 'Bottom, Left' }; $btnSalir.Anchor = 'Bottom, Right'
 function PixelElegido { 0.0254 / [double]$cmbPpp.SelectedItem * [double]$cmbEsc.SelectedItem }
 function MostrarPixel { $lblPix.Text = ('= pixel de {0:N1} mm en la realidad' -f ((PixelElegido) * 1000)) }
@@ -2481,6 +2506,83 @@ function PedirRevit([string[]]$lineas) {
   return ,$r
 }
 
+# Arma un DWG por corte con AutoCAD (imagenes incrustadas y agrupadas). $nombres: cortes a armar; $imgDir: carpeta
+# con Corte_<nombre>_revit_conjunto.tif / _rojo.tif; $px: pixel final (0 = el del TIFF). Devuelve los nombres listos.
+function ArmarDwg([string[]]$nombres, [string]$imgDir, [double]$px) {
+  Paso 'Preparando las imagenes para AutoCAD...'
+  [CNPrep]::SinGeo.Clear()
+  EsperarHilo ([CNBg]::Build($Root, $imgDir, $Png, $px, $px, $MAX_PX, $BAJA, $SEPARACION, ($nombres -join ','), $DwgDir))
+  foreach ($a in [CNPrep]::SinGeo) { Log "   AVISO: $a" }
+  $ok = @()
+  foreach ($L in [CNBg]::Letras) {
+    $dwg = Join-Path $DwgDir "Corte $L.dwg"
+    if (Test-Path -LiteralPath $dwg) {
+      try { $fs = [IO.File]::Open($dwg, 'Open', 'ReadWrite', 'None'); $fs.Close() }
+      catch { Log "Corte $L : 'Corte $L.dwg' esta abierto en AutoCAD. Cierralo y vuelve a intentar."; continue }
+    }
+    Paso "Armando 'Corte $L.dwg' en AutoCAD (se abre y se cierra solo; no copies ni pegues nada)..."
+    $t0 = Get-Date
+    $pr = Start-Process -FilePath $AUTOCAD -ArgumentList "/nologo /b `"$(Join-Path $Png "armar_$L.scr")`"" -PassThru
+    EsperarProc $pr
+    if ((Test-Path -LiteralPath $dwg) -and ((Get-Item -LiteralPath $dwg).LastWriteTime -ge $t0.AddSeconds(-2))) {
+      Log ("   OK  Corte {0}.dwg  ({1} MB)" -f $L, [math]::Round((Get-Item -LiteralPath $dwg).Length / 1MB, 1))
+      Remove-Item -LiteralPath (Join-Path $DwgDir "Corte $L.bak") -Force -ErrorAction SilentlyContinue
+      $ok += $L
+    } else { Log "   ERROR: AutoCAD no guardo 'Corte $L.dwg'" }
+    $barra.Value = [math]::Min($barra.Maximum, $barra.Value + 1)
+  }
+  return ,$ok
+}
+
+# Atajo: TIFF que ya tienes -> DWG (sin Revit). Los Corte_<n>_revit_conjunto/_rojo se juntan en un DWG por corte;
+# cualquier otro TIFF va solo en su propio DWG (si no esta georreferenciado se escala con sus ppp y la escala elegida).
+function TiffACad {
+  if (-not $AUTOCAD) { throw 'No encuentro AutoCAD instalado.' }
+  $d = New-Object System.Windows.Forms.OpenFileDialog
+  $d.Title = 'Elige los TIFF de tus cortes (puedes elegir varios)'; $d.Filter = 'Imagenes TIFF (*.tif;*.tiff)|*.tif;*.tiff'; $d.Multiselect = $true
+  if (Test-Path -LiteralPath $TifDir) { $d.InitialDirectory = $TifDir }
+  if ($d.ShowDialog() -ne 'OK') { return }
+  $dir = Join-Path $Tmp 'tiff_a_autocad'
+  if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
+  foreach ($x in $dir, $DwgDir, $Png) { New-Item -ItemType Directory -Force -Path $x | Out-Null }
+  [CNPrep]::Escala = [double]$cmbEsc.SelectedItem; [CNPrep]::PxSinGeo = PixelElegido
+  $nombres = @()
+  # si eliges solo una de las dos imagenes de un corte del generador, se agrega la otra (con fondo / seccion roja)
+  $archivos = New-Object System.Collections.Generic.List[string]
+  foreach ($f in $d.FileNames) {
+    if (-not $archivos.Contains($f)) { $archivos.Add($f) }
+    if ([IO.Path]::GetFileNameWithoutExtension($f) -match '^(Corte_.+_revit_)(conjunto|rojo)$') {
+      $otro = Join-Path (Split-Path $f -Parent) ($Matches[1] + $(if ($Matches[2] -eq 'rojo') { 'conjunto' } else { 'rojo' }) + [IO.Path]::GetExtension($f))
+      if ((Test-Path -LiteralPath $otro) -and -not $archivos.Contains($otro)) { $archivos.Add($otro) }
+    }
+  }
+  foreach ($f in $archivos) {
+    $b = [IO.Path]::GetFileNameWithoutExtension($f)
+    if ($b -match '^Corte_(.+)_revit_(conjunto|rojo)$') { $n = $Matches[1]; $k = $Matches[2] }
+    else { $n = ($b -replace '^Corte[_ ]', '') -replace '[\\/:*?"<>|]', '_'; $k = 'conjunto' }
+    $dst = Join-Path $dir "Corte_$($n)_revit_$k.tif"
+    if (Test-Path -LiteralPath $dst) { Log "   (repetido, se ignora) $f"; continue }
+    Copy-Item -LiteralPath $f -Destination $dst -Force
+    if ($nombres -notcontains $n) { $nombres += $n }
+  }
+  if (-not $nombres.Count) { return }
+  $script:trabajando = $true
+  foreach ($c in $btnGen, $btnTiff, $lista, $btnHerr) { $c.Enabled = $false }
+  try {
+    $barra.Maximum = $nombres.Count + 1; $barra.Value = 0
+    Log "TIFF a AutoCAD: $($nombres.Count) corte(s): $($nombres -join ', ')"
+    $ok = ArmarDwg $nombres $dir 0
+    $barra.Value = $barra.Maximum
+    Paso ("TERMINADO: {0} de {1} DWG en la carpeta CORTES DWG." -f $ok.Count, $nombres.Count)
+    [System.Media.SystemSounds]::Asterisk.Play()
+  } catch { Log "ERROR: $($_.Exception.Message)"; Paso 'No se pudo terminar. Revisa los mensajes.' }
+  finally {
+    foreach ($c in $btnGen, $btnTiff, $lista, $btnHerr) { $c.Enabled = $true }
+    $script:trabajando = $false
+    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function Generar {
   $sel = @($lista.Items | Where-Object { $_.Checked })
   if ($sel.Count -eq 0) { [System.Windows.Forms.MessageBox]::Show('Marca al menos un corte en la lista.', 'Generador de cortes') | Out-Null; return }
@@ -2543,31 +2645,12 @@ function Generar {
   }
   $barra.Value = ++$hecho
   if ($listos.Count -eq 0) { Paso 'No se genero ningun corte. Revisa los mensajes.'; return }
-  Paso 'Preparando las imagenes para AutoCAD...'
-  $solo = (@($listos | ForEach-Object { $_.Text }) -join ',')
-  EsperarHilo ([CNBg]::Build($Root, $TifDir, $Png, $px, $px, $MAX_PX, $BAJA, $SEPARACION, $solo, $DwgDir))
-  $barra.Value = ++$hecho
-  foreach ($L in [CNBg]::Letras) {
-    $dwg = Join-Path $DwgDir "Corte $L.dwg"
-    if (Test-Path -LiteralPath $dwg) {
-      try { $fs = [IO.File]::Open($dwg, 'Open', 'ReadWrite', 'None'); $fs.Close() }
-      catch { Log "Corte $L : 'Corte $L.dwg' esta abierto en AutoCAD. Cierralo y vuelve a pulsar GENERAR."; continue }
+  $hechos = ArmarDwg @($listos | ForEach-Object { $_.Text }) $TifDir $px
+  foreach ($it in $listos) {
+    if ($hechos -contains $it.Text) {
+      [IO.File]::WriteAllText((Marca $it.Tag), ([CNSec]::Firma($it.Tag) + '|' + $it.Text))
+      $it.SubItems[5].Text = "LISTO: Corte $($it.Text).dwg"; $it.Checked = $false
     }
-    Paso "Armando 'Corte $L.dwg' en AutoCAD (se abre y se cierra solo; no copies ni pegues nada)..."
-    $t0 = Get-Date
-    $pr = Start-Process -FilePath $AUTOCAD -ArgumentList "/nologo /b `"$(Join-Path $Png "armar_$L.scr")`"" -PassThru
-    EsperarProc $pr
-    if ((Test-Path -LiteralPath $dwg) -and ((Get-Item -LiteralPath $dwg).LastWriteTime -ge $t0.AddSeconds(-2))) {
-      Log ("   OK  Corte {0}.dwg  ({1} MB)" -f $L, [math]::Round((Get-Item -LiteralPath $dwg).Length / 1MB, 1))
-      Remove-Item -LiteralPath (Join-Path $DwgDir "Corte $L.bak") -Force -ErrorAction SilentlyContinue
-      foreach ($it in $listos) {
-        if ($it.Text -eq $L) {
-          [IO.File]::WriteAllText((Marca $it.Tag), ([CNSec]::Firma($it.Tag) + '|' + $it.Text))
-          $it.SubItems[5].Text = "LISTO: Corte $L.dwg"; $it.Checked = $false
-        }
-      }
-    } else { Log "   ERROR: AutoCAD no guardo 'Corte $L.dwg'" }
-    $barra.Value = [math]::Min($barra.Maximum, $barra.Value + 1)
   }
   $barra.Value = $barra.Maximum
   Paso 'TERMINADO. Abre la carpeta CORTES DWG con el boton de abajo.'
@@ -2700,17 +2783,18 @@ $cmbEsc.Add_SelectedIndexChanged({ MostrarPixel })
 $btnTif.Add_Click({ New-Item -ItemType Directory -Force -Path $TifDir | Out-Null; Start-Process explorer.exe -ArgumentList "`"$TifDir`"" })
 $btnDwg.Add_Click({ New-Item -ItemType Directory -Force -Path $DwgDir | Out-Null; Start-Process explorer.exe -ArgumentList "`"$DwgDir`"" })
 $btnSalir.Add_Click({ $form.Close() })
+$btnTiff.Add_Click({ if (-not $script:trabajando) { try { TiffACad } catch { Paso "ERROR: $($_.Exception.Message)" } } })
 $btnGen.Add_Click({
   if ($script:trabajando) { return }
   $script:trabajando = $true
-  foreach ($c in $btnGen, $lista, $btnReinst) { $c.Enabled = $false }
+  foreach ($c in $btnGen, $lista, $btnReinst, $btnTiff) { $c.Enabled = $false }
   $btnGen.Text = 'GENERANDO...  (puedes dejarlo trabajando)'
   try { Generar } catch {
     Paso "ERROR: $($_.Exception.Message)"
     [System.Windows.Forms.MessageBox]::Show("ERROR:`n`n$($_.Exception.Message)", 'Generador de cortes', 'OK', 'Error') | Out-Null
   } finally {
-    foreach ($c in $btnGen, $lista, $btnReinst) { $c.Enabled = $true }
-    $btnGen.Text = 'GENERAR CORTES'; $script:trabajando = $false
+    foreach ($c in $btnGen, $lista, $btnReinst, $btnTiff) { $c.Enabled = $true }
+    $btnGen.Text = 'GENERAR CORTES  (desde Revit)'; $script:trabajando = $false
   }
 })
 $reloj = New-Object System.Windows.Forms.Timer

@@ -1,10 +1,10 @@
 {
- "version": "2026.11.25.3",
- "fecha": "2026-11-25 22:06",
- "notas": "Mucho mas simple: detecta el Revit abierto, lee los cortes y saca la nube directo de Revit (sin CloudCompare ni elegir nube), TIFF y DWG a escala real. Herramientas poco usadas en un menu. La lectura de la nube se actualiza sin reiniciar Revit.",
+ "version": "2026.11.25.4",
+ "fecha": "2026-11-25 22:56",
+ "notas": "Nuevo atajo: 'Ya tengo los TIFF: pasar a AutoCAD'. Eliges tus TIFF y sale un DWG por corte a escala real, sin pasar por Revit (si eliges una de las dos imagenes de un corte, la otra se agrega sola).",
  "min_lanzador": 1,
  "archivos": {
-  "GENERADOR_DE_CORTES.bat": "f4871c6b3d0c3abd4f4ec8feabfa080d4b7d7ddcb1e23bed6c240624b777a0a8",
-  "LEEME_CORTES_REVIT.txt": "312abd1944643429b224b8b92703578c6a290343f6609a80a92225f13d965fc9"
+  "GENERADOR_DE_CORTES.bat": "a72341b08b69fafed1408fd8bc486b6bbb89e2a4ae284038fe63bc3b7f2054e0",
+  "LEEME_CORTES_REVIT.txt": "3b3e41e78b6f92ec09ddec2c3ab8e5ef1e3ce9ea7448e66031d96c93c30408ab"
  }
 }
