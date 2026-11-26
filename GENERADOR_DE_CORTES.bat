@@ -66,6 +66,13 @@ public static class CNPrep
     // TIFF sin georreferencia (p. ej. exportado de otro programa): escala con sus ppp y esta escala (1:Escala);
     // si tampoco trae ppp, se usa PxSinGeo (m por pixel). Origen en (0,0) = esquina inferior izquierda.
     public static double Escala = 50, PxSinGeo = 0;
+    // como sabe la medida del ultimo TIFF leido: 0 = georreferenciado, 1 = por sus ppp (+ escala), 2 = sin datos (pixel elegido)
+    public static int UltimaMedida = 0; public static double UltimosPpp = 0;
+    public static int Medida(string path)
+    {
+        double e = Escala, p = PxSinGeo;
+        try { Escala = 50; PxSinGeo = 0.001; ReadInfo(path); return UltimaMedida; } finally { Escala = e; PxSinGeo = p; }
+    }
     public static List<string> SinGeo = new List<string>();
     static double Racional(FileStream fs, Tif t, byte[] e, int vo, int vlen)
     {
@@ -189,8 +196,11 @@ public static class CNPrep
         if (t.Spp < 3) throw new Exception("El TIFF no tiene color RGB. En CloudCompare marca 'Export RGB colors'.");
         if (t.Comp != 1 && t.Comp != 5 && t.Comp != 8 && t.Comp != 32946 && t.Comp != 32773)
             throw new Exception("Compresion TIFF no soportada (" + t.Comp + ").");
+        UltimaMedida = 0; UltimosPpp = 0;
         if (!t.Geo || t.Sx <= 0)
         {
+            UltimosPpp = t.Dpi > 1 ? (t.ResUnit == 3 ? t.Dpi * 2.54 : t.Dpi) : 0;
+            UltimaMedida = UltimosPpp > 1 ? 1 : 2;
             double dpi = t.Dpi > 1 ? (t.ResUnit == 3 ? t.Dpi * 2.54 : t.Dpi) : 0;
             double px = (dpi > 1 && Escala > 0) ? 0.0254 / dpi * Escala : PxSinGeo;
             if (px <= 0) throw new Exception("El TIFF no trae georreferencia ni resolucion (ppp): no se puede saber su escala. " + System.IO.Path.GetFileName(path));
@@ -408,10 +418,17 @@ public static class CNPrep
     // ------------------------------------------------------------------ proceso completo
     // src: TIFF de CloudCompare. outDir: carpeta de salida. baseName: nombre base de los PNG.
     // pixelFinal: tamano de pixel deseado (m). maxPx: lado maximo de cada pedazo (px).
+    static bool Lleno(byte[] row, int x, bool blanco)
+    {
+        int o = 4 * x;
+        if (row[o + 3] == 0) return false;
+        return !(blanco && row[o] >= 245 && row[o + 1] >= 245 && row[o + 2] >= 245);
+    }
     public static Tile[] Prepare(string src, string outDir, string baseName, double pixelFinal, int maxPx)
     {
         Tif t = ReadInfo(src);
         byte[] row = new byte[t.W * 4];
+        bool blanco = t.Spp - t.Extra < 4 && t.Extra == 0;   // RGB sin transparencia (p. ej. exportado de Revit): el blanco es vacio
         int x0 = int.MaxValue, x1 = -1, y0 = int.MaxValue, y1 = -1;
         using (RowReader rr = new RowReader(t))
         {
@@ -419,9 +436,9 @@ public static class CNPrep
             {
                 rr.ReadRow(y, row);
                 int a = -1, b = -1;
-                for (int x = 0; x < t.W; x++) if (row[4 * x + 3] != 0) { a = x; break; }
+                for (int x = 0; x < t.W; x++) if (Lleno(row, x, blanco)) { a = x; break; }
                 if (a < 0) continue;
-                for (int x = t.W - 1; x >= a; x--) if (row[4 * x + 3] != 0) { b = x; break; }
+                for (int x = t.W - 1; x >= a; x--) if (Lleno(row, x, blanco)) { b = x; break; }
                 if (a < x0) x0 = a; if (b > x1) x1 = b; if (y < y0) y0 = y; y1 = y;
             }
         }
@@ -576,7 +593,7 @@ public static class CNPrep
     static Tile[] PrepareCached(Img im, string pngDir, double px, int maxPx)
     {
         FileInfo fi = new FileInfo(im.Path);
-        string key = fi.Length + "|" + fi.LastWriteTimeUtc.Ticks + "|" + px.ToString("R", CultureInfo.InvariantCulture) + "|" + maxPx;
+        string key = fi.Length + "|" + fi.LastWriteTimeUtc.Ticks + "|" + px.ToString("R", CultureInfo.InvariantCulture) + "|" + maxPx + "|v2|" + Escala.ToString("R", CultureInfo.InvariantCulture) + "|" + PxSinGeo.ToString("R", CultureInfo.InvariantCulture);
         string side = Path.Combine(pngDir, im.Name + ".info.txt");
         if (File.Exists(side))
         {
@@ -659,7 +676,7 @@ public static class CNPrep
             List<string> M = new List<string>();
             M.Add("MEDIDAS DEL CORTE " + L + "  (coordenadas en metros dentro de 'Corte " + L + ".dwg')");
             M.Add("Cada imagen se pega con su esquina INFERIOR IZQUIERDA en (X, Y) y con el ancho y alto indicados.");
-            M.Add("Y = 0 es el nivel +/-0.00 (Z = 0 de la nube) de la fila 'sin fondo'; la fila 'con fondo' esta " + F4(baja) + " m mas abajo.");
+            M.Add("Y = 0 es el nivel +/-0.00 (Z = 0 de la nube) de la fila 'sin fondo'; la otra fila esta debajo (al menos " + F4(baja) + " m, mas si las imagenes son altas).");
             M.Add("");
             M.Add(string.Format("{0,-44} {1,-16} {2,10} {3,10} {4,9} {5,9}", "IMAGEN", "CAPA", "X", "Y", "ANCHO", "ALTO"));
             S.Add("(vl-load-com)");
@@ -681,6 +698,15 @@ public static class CNPrep
                 foreach (Tile t in fr) { umin = Math.Min(umin, t.U); umax = Math.Max(umax, t.U + t.W); }
                 foreach (Tile t in fo) { umin = Math.Min(umin, t.U); umax = Math.Max(umax, t.U + t.W); }
                 double d = x0 - umin;
+                // la fila de abajo no debe pisar la de arriba (imagenes altas, p. ej. exportadas de Revit)
+                double bj = baja;
+                if (fr.Count > 0 && fo.Count > 0)
+                {
+                    double zminArr = double.MaxValue, zmaxAba = double.MinValue;
+                    foreach (Tile t in fr) zminArr = Math.Min(zminArr, t.Zbot);
+                    foreach (Tile t in fo) zmaxAba = Math.Max(zmaxAba, t.Zbot + t.H);
+                    bj = Math.Max(baja, Math.Ceiling(zmaxAba - zminArr + 2.5));
+                }
                 foreach (Tile t in fr)
                 {
                     S.Add("(cn:mete (cn:ole \"" + Lsp(t.File) + "\" " + F4(t.U + d) + " " + F4(t.Zbot) + " " + F4(t.W) + " " + F4(t.H) + " \"" + capaArr + "\") (quote cn:g1))");
@@ -688,12 +714,12 @@ public static class CNPrep
                 }
                 foreach (Tile t in fo)
                 {
-                    S.Add("(cn:mete (cn:ole \"" + Lsp(t.File) + "\" " + F4(t.U + d) + " " + F4(t.Zbot - baja) + " " + F4(t.W) + " " + F4(t.H) + " \"" + capaAba + "\") (quote cn:g2))");
-                    M.Add(string.Format("{0,-44} {1,-16} {2,10} {3,10} {4,9} {5,9}", Path.GetFileName(t.File), capaAba, F4(t.U + d), F4(t.Zbot - baja), F4(t.W), F4(t.H)));
+                    S.Add("(cn:mete (cn:ole \"" + Lsp(t.File) + "\" " + F4(t.U + d) + " " + F4(t.Zbot - bj) + " " + F4(t.W) + " " + F4(t.H) + " \"" + capaAba + "\") (quote cn:g2))");
+                    M.Add(string.Format("{0,-44} {1,-16} {2,10} {3,10} {4,9} {5,9}", Path.GetFileName(t.File), capaAba, F4(t.U + d), F4(t.Zbot - bj), F4(t.W), F4(t.H)));
                 }
                 double xa = x0, xb = umax + d;
                 string lado = v == "ladoA" ? "mirando como la seccion de Revit" : v == "ladoB" ? "mirando al lado contrario" : v.Replace("mira", "hacia ");
-                foreach (double yy in new double[] { 0.0, -baja })
+                foreach (double yy in new double[] { 0.0, -bj })
                 {
                     string gq = ")";
                     S.Add("(progn (cn:lin " + F4(xa - 0.5) + " " + F4(yy) + " " + F4(xb + 0.5) + " " + F4(yy) + " \"CORTE_NIVEL\")" + gq);
@@ -702,12 +728,12 @@ public static class CNPrep
                 if (v == "revit")
                 {
                     S.Add("(progn (cn:txt \"corte " + L + " - con fondo y linea de corte\" " + F4(xa) + " -1.2 0.4 \"CORTE_TEXTO\"))");
-                    S.Add("(progn (cn:txt \"corte " + L + " - seccion (linea de corte)\" " + F4(xa) + " " + F4(-1.2 - baja) + " 0.4 \"CORTE_TEXTO\"))");
+                    S.Add("(progn (cn:txt \"corte " + L + " - seccion (linea de corte)\" " + F4(xa) + " " + F4(-1.2 - bj) + " 0.4 \"CORTE_TEXTO\"))");
                 }
                 else
                 {
                     S.Add("(cn:txt \"corte " + L + " - sin fondo (franja de 10cm)  (" + lado + ")\" " + F4(xa) + " -1.2 0.4 \"CORTE_TEXTO\")");
-                    S.Add("(cn:txt \"corte " + L + " - con fondo  (" + lado + ")\" " + F4(xa) + " " + F4(-1.2 - baja) + " 0.4 \"CORTE_TEXTO\")");
+                    S.Add("(cn:txt \"corte " + L + " - con fondo  (" + lado + ")\" " + F4(xa) + " " + F4(-1.2 - bj) + " 0.4 \"CORTE_TEXTO\")");
                 }
                 x0 = xb + sep;
             }
@@ -2644,30 +2670,75 @@ function MostrarGuia {
     'Generador de cortes - guia rapida', 'OK', 'Information') | Out-Null
 }
 
+# nombre del corte y tipo de imagen segun el nombre del TIFF
+#   Corte_<n>_revit_conjunto / _rojo (del generador), "<n> CCL" / "<n> LC" (exportados de Revit: con fondo / linea de corte)
+function ClaseTiff([string]$f) {
+  $b = [IO.Path]::GetFileNameWithoutExtension($f)
+  if ($b -match '^Corte_(.+)_revit_(conjunto|rojo)$') { return @{ N = $Matches[1]; K = $Matches[2]; Otro = $(if ($Matches[2] -eq 'rojo') { "Corte_$($Matches[1])_revit_conjunto" } else { "Corte_$($Matches[1])_revit_rojo" }) } }
+  if ($b -match '^(.+?)\s+(CCL|LC)$') { $n = ($Matches[1].Trim() -replace '^Corte[_ ]+', ''); $k = if ($Matches[2] -ieq 'LC') { 'rojo' } else { 'conjunto' }; $o = $b.Substring(0, $b.Length - $Matches[2].Length) + $(if ($k -eq 'rojo') { 'CCL' } else { 'LC' }); return @{ N = ($n -replace '[\\/:*?"<>|]', '_'); K = $k; Otro = $o } }
+  return @{ N = (($b -replace '^Corte[_ ]', '') -replace '[\\/:*?"<>|]', '_'); K = 'conjunto'; Otro = $null }
+}
+# escala de TIFF que no la traen grabada (p. ej. exportados de Revit): ppp + escala con que se exportaron
+function PedirEscala([int]$cuantos, [double]$pppTag) {
+  $f = New-Object System.Windows.Forms.Form; $f.Text = 'Escala de los TIFF'; $f.Size = New-Object System.Drawing.Size(560, 300); $f.StartPosition = 'CenterParent'; $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false; $f.Font = $fuente
+  $l = New-Object System.Windows.Forms.Label; $l.Location = New-Object System.Drawing.Point(15, 12); $l.Size = New-Object System.Drawing.Size(520, 110)
+  $l.Text = "$cuantos TIFF no traen su medida real grabada (no son del generador).`n`nIndica con que resolucion y a que escala los exportaste. En Revit la escala es la de la vista (sale en el titulo, p. ej. '1 : 100'); la resolucion es la elegida al exportar la imagen.`nSi te equivocas, el DWG sale mas grande o mas chico (p. ej. la mitad)."
+  $f.Controls.Add($l)
+  $l1 = New-Object System.Windows.Forms.Label; $l1.Text = 'Resolucion (ppp):'; $l1.Location = New-Object System.Drawing.Point(15, 135); $l1.AutoSize = $true; $f.Controls.Add($l1)
+  $c1 = New-Object System.Windows.Forms.ComboBox; $c1.DropDownStyle = 'DropDownList'; $c1.Location = New-Object System.Drawing.Point(160, 131); $c1.Size = New-Object System.Drawing.Size(90, 26)
+  foreach ($v in '72', '96', '150', '200', '300', '400', '600', '1200') { [void]$c1.Items.Add($v) }
+  $ini = if ($pppTag -gt 1) { [string][int][math]::Round($pppTag) } else { [string]$cmbPpp.SelectedItem }; if (-not $c1.Items.Contains($ini)) { [void]$c1.Items.Add($ini) }; $c1.SelectedItem = $ini; $f.Controls.Add($c1)
+  $l2 = New-Object System.Windows.Forms.Label; $l2.Text = 'Escala   1 :'; $l2.Location = New-Object System.Drawing.Point(280, 135); $l2.AutoSize = $true; $f.Controls.Add($l2)
+  $c2 = New-Object System.Windows.Forms.ComboBox; $c2.DropDownStyle = 'DropDownList'; $c2.Location = New-Object System.Drawing.Point(365, 131); $c2.Size = New-Object System.Drawing.Size(90, 26)
+  foreach ($v in '10', '20', '25', '50', '75', '100', '125', '200', '250', '500') { [void]$c2.Items.Add($v) }
+  $c2.SelectedItem = '100'; $f.Controls.Add($c2)
+  $lp = New-Object System.Windows.Forms.Label; $lp.Location = New-Object System.Drawing.Point(15, 175); $lp.Size = New-Object System.Drawing.Size(520, 24); $lp.ForeColor = [System.Drawing.Color]::DarkSlateBlue; $f.Controls.Add($lp)
+  $act = { $lp.Text = ('= cada pixel mide {0:N2} mm en la realidad' -f (25.4 / [double]$c1.SelectedItem * [double]$c2.SelectedItem)) }.GetNewClosure()
+  $c1.Add_SelectedIndexChanged($act); $c2.Add_SelectedIndexChanged($act); & $act
+  $ok = New-Object System.Windows.Forms.Button; $ok.Text = 'Aceptar'; $ok.Location = New-Object System.Drawing.Point(330, 212); $ok.Size = New-Object System.Drawing.Size(100, 32); $ok.DialogResult = 'OK'; $f.Controls.Add($ok); $f.AcceptButton = $ok
+  $ca = New-Object System.Windows.Forms.Button; $ca.Text = 'Cancelar'; $ca.Location = New-Object System.Drawing.Point(440, 212); $ca.Size = New-Object System.Drawing.Size(95, 32); $ca.DialogResult = 'Cancel'; $f.Controls.Add($ca); $f.CancelButton = $ca
+  if ($f.ShowDialog($form) -ne 'OK') { return $null }
+  return @{ Ppp = [double]$c1.SelectedItem; Esc = [double]$c2.SelectedItem }
+}
+
 function TiffACad {
   if (-not $AUTOCAD) { throw 'No encuentro AutoCAD instalado.' }
   $d = New-Object System.Windows.Forms.OpenFileDialog
   $d.Title = 'Elige los TIFF de tus cortes (puedes elegir varios)'; $d.Filter = 'Imagenes TIFF (*.tif;*.tiff)|*.tif;*.tiff'; $d.Multiselect = $true
-  if (Test-Path -LiteralPath $TifDir) { $d.InitialDirectory = $TifDir }
+  $memo = Join-Path $Tmp 'ultima_carpeta_tif.txt'
+  if (-not $script:ultimaCarpetaTif -and (Test-Path -LiteralPath $memo)) { $script:ultimaCarpetaTif = (Get-Content -LiteralPath $memo -Raw).Trim() }
+  if ($script:ultimaCarpetaTif -and (Test-Path -LiteralPath $script:ultimaCarpetaTif)) { $d.InitialDirectory = $script:ultimaCarpetaTif } elseif (Test-Path -LiteralPath $TifDir) { $d.InitialDirectory = $TifDir }
   if ($d.ShowDialog() -ne 'OK') { return }
+  $carpeta = Split-Path $d.FileNames[0] -Parent; $script:ultimaCarpetaTif = $carpeta; try { Set-Content -LiteralPath $memo -Value $carpeta } catch {}
+  $elegidos = @($d.FileNames)
+  # por lotes: si eliges uno solo, ofrece pasar todos los TIFF de esa carpeta
+  $todos = @(Get-ChildItem -LiteralPath $carpeta -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match '^\.tiff?$' } | Sort-Object Name | ForEach-Object { $_.FullName })
+  if ($elegidos.Count -eq 1 -and $todos.Count -gt 2) {
+    if ([System.Windows.Forms.MessageBox]::Show("En esa carpeta hay $($todos.Count) TIFF.`n`nPasarlos TODOS a AutoCAD?`n(No = solo el que elegiste y su pareja)", 'Ya tengo los TIFF', 'YesNo', 'Question') -eq 'Yes') { $elegidos = $todos }
+  }
   $dir = Join-Path $Tmp 'tiff_a_autocad'
   if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
   foreach ($x in $dir, $DwgDir, $Png) { New-Item -ItemType Directory -Force -Path $x | Out-Null }
-  [CNPrep]::Escala = [double]$cmbEsc.SelectedItem; [CNPrep]::PxSinGeo = PixelElegido
   $nombres = @()
-  # si eliges solo una de las dos imagenes de un corte del generador, se agrega la otra (con fondo / seccion roja)
+  # si eliges solo una de las dos imagenes de un corte, se agrega la otra (con fondo / linea de corte)
   $archivos = New-Object System.Collections.Generic.List[string]
-  foreach ($f in $d.FileNames) {
+  foreach ($f in $elegidos) {
     if (-not $archivos.Contains($f)) { $archivos.Add($f) }
-    if ([IO.Path]::GetFileNameWithoutExtension($f) -match '^(Corte_.+_revit_)(conjunto|rojo)$') {
-      $otro = Join-Path (Split-Path $f -Parent) ($Matches[1] + $(if ($Matches[2] -eq 'rojo') { 'conjunto' } else { 'rojo' }) + [IO.Path]::GetExtension($f))
-      if ((Test-Path -LiteralPath $otro) -and -not $archivos.Contains($otro)) { $archivos.Add($otro) }
-    }
+    $c = ClaseTiff $f
+    if ($c.Otro) { foreach ($ext in [IO.Path]::GetExtension($f), '.tif', '.tiff') { $otro = Join-Path (Split-Path $f -Parent) ($c.Otro + $ext); if ((Test-Path -LiteralPath $otro) -and -not $archivos.Contains($otro)) { $archivos.Add($otro); break } } }
+  }
+  # medida: los TIFF sin georreferencia necesitan ppp + escala
+  $sinMedida = @(); $pppTag = 0
+  foreach ($f in $archivos) { try { $m = [CNPrep]::Medida($f); if ($m -ne 0) { $sinMedida += $f; if ([CNPrep]::UltimosPpp -gt 1) { $pppTag = [CNPrep]::UltimosPpp } } } catch { Log "   (no se puede leer) $([IO.Path]::GetFileName($f)): $($_.Exception.Message)" } }
+  [CNPrep]::SinGeo.Clear()
+  if ($sinMedida.Count) {
+    $e = PedirEscala $sinMedida.Count $pppTag
+    if (-not $e) { Paso 'Cancelado.'; return }
+    [CNPrep]::Escala = 0; [CNPrep]::PxSinGeo = 0.0254 / $e.Ppp * $e.Esc   # Escala 0: se usa este pixel para todos
+    Log ("TIFF sin medida grabada: {0} ppp a 1:{1}  ->  pixel {2:N2} mm" -f $e.Ppp, $e.Esc, ([CNPrep]::PxSinGeo * 1000))
   }
   foreach ($f in $archivos) {
-    $b = [IO.Path]::GetFileNameWithoutExtension($f)
-    if ($b -match '^Corte_(.+)_revit_(conjunto|rojo)$') { $n = $Matches[1]; $k = $Matches[2] }
-    else { $n = ($b -replace '^Corte[_ ]', '') -replace '[\\/:*?"<>|]', '_'; $k = 'conjunto' }
+    $c = ClaseTiff $f; $n = $c.N; $k = $c.K
     $dst = Join-Path $dir "Corte_$($n)_revit_$k.tif"
     if (Test-Path -LiteralPath $dst) { Log "   (repetido, se ignora) $f"; continue }
     Copy-Item -LiteralPath $f -Destination $dst -Force

@@ -1,10 +1,10 @@
 {
- "version": "2026.11.26.2",
- "fecha": "2026-11-26 07:45",
- "notas": "Probada a fondo: cortes largos ya no fallan, vincular nube sin ventanas en Revit, el complemento se renueva sin cerrar Revit, aviso inmediato si el DWG esta abierto, copia del DWG anterior, icono propio en la barra de tareas, doble clic ya no cambia la marca, nombres repetidos bloqueados.",
+ "version": "2026.11.26.3",
+ "fecha": "2026-11-26 14:55",
+ "notas": "TIFF exportados de Revit: pregunta ppp y escala (corrige el DWG a la mitad), junta CCL + LC en un DWG, pasa toda la carpeta de una vez, recorta el fondo blanco, filas sin encimarse, recuerda la ultima carpeta.",
  "min_lanzador": 1,
  "archivos": {
-  "GENERADOR_DE_CORTES.bat": "1444d8055425c893a684850a1f0d8c2ea8e4e663462440a7595128cf94181b60",
-  "LEEME_CORTES_REVIT.txt": "b69f792e40bb8d2e527ec10bbe2172ed6a8346dd93d2b43210bf71e515ecf36d"
+  "GENERADOR_DE_CORTES.bat": "202969371f9589459428df14c21101ee36e8a4026ec38d39c22db03376e52465",
+  "LEEME_CORTES_REVIT.txt": "a2579280918fb26c2ba1cbec383c67cb51e8f347b43c257a7dc9c4d7d47c6d60"
  }
 }

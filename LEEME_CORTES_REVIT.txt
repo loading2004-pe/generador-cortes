@@ -55,3 +55,11 @@ ATAJO: "Ya tengo los TIFF: pasar a AutoCAD"
   - Los TIFF del generador (Corte_<nombre>_revit_conjunto / _rojo) se juntan solos: basta elegir uno de los dos.
   - Cualquier otro TIFF va en su propio DWG. Si no trae georreferencia se escala con sus ppp y la escala elegida
     (Calidad: ppp a 1:escala); el registro avisa con que tamano de pixel se escalo.
+
+TIFF EXPORTADOS DE REVIT (u otro programa, sin georreferencia): boton 'Ya tengo los TIFF'.
+  - Elige UNO y responde 'Si' para pasar TODA la carpeta de una vez (por lotes).
+  - '<nombre> CCL' (con fondo) y '<nombre> LC' (linea de corte) se juntan en un DWG: 'Corte <nombre>.dwg'.
+  - Como no traen su medida, la app pregunta la resolucion (ppp) y la ESCALA con que se exportaron.
+    En Revit es la escala de la vista (sale en el titulo, p. ej. '1 : 100'). Si pones 1:50 en vez de 1:100
+    el DWG sale a la MITAD. Ejemplo: 600 ppp a 1:100 = pixel de 4.23 mm.
+  - El fondo blanco se recorta solo.
