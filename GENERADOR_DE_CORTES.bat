@@ -727,6 +727,14 @@ public static class CNPrep
         return listas.ToArray();
     }
 }
+
+// ventana propia en la barra de tareas (si no, se agrupa con PowerShell y no se encuentra)
+public static class CNWin
+{
+    [System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern int SetCurrentProcessExplicitAppUserModelID(string id);
+    public static void AppId(string id) { try { SetCurrentProcessExplicitAppUserModelID(id); } catch (Exception) { } }
+}
 public static class CNTif {
   public class Info { public int W, H, Spp = 1, Rps = int.MaxValue, Comp = 1; public long[] Off; public double U0, V0, Sx = 0, Sy = 0; }
   public static Info Read(string p) {
@@ -1795,7 +1803,7 @@ namespace CortesNubeMotor
     }
 }
 '@
-$VERSION_COMPLEMENTO = '398a8e5000'
+$VERSION_COMPLEMENTO = 'b57aed75a6'
 $FUENTE_COMPLEMENTO = @'
 // Complemento de Revit "Cortes nube" (Quinta Heeren)
 // Escribe en vivo las SECCIONES del proyecto abierto en  Documentos\CortesNube\secciones_revit.txt
@@ -2037,14 +2045,20 @@ namespace CortesNube
             catch (Exception ex) { Log(ex.ToString()); }
         }
 
+        // resultado para el generador (sin ventanas en Revit: quedarian detras de la app y bloquearian Revit)
+        static void ResultadoVinculo(bool ok, string msg)
+        {
+            try { File.WriteAllText(Path.Combine(Carpeta, "vincular_listo.txt"), (ok ? "OK|" : "ERROR|") + msg.Replace("\r", " ").Replace("\n", " ")); } catch (Exception) { }
+        }
+
         public static void Vincular(Document doc, string ruta)
         {
             try
             {
-                if (!File.Exists(ruta)) { TaskDialog.Show("Cortes nube", "No existe la nube:\n" + ruta); return; }
-                if (doc.IsFamilyDocument) { TaskDialog.Show("Cortes nube", "Abre un PROYECTO de Revit (no una familia) para vincular la nube."); return; }
+                if (!File.Exists(ruta)) { ResultadoVinculo(false, "No existe la nube: " + ruta); return; }
+                if (doc.IsFamilyDocument) { ResultadoVinculo(false, "Abre un PROYECTO de Revit (no una familia) para vincular la nube."); return; }
                 string ext = Path.GetExtension(ruta).TrimStart('.').ToLowerInvariant();
-                if (ext != "rcp" && ext != "rcs") { TaskDialog.Show("Cortes nube", "La nube debe ser .rcp o .rcs:\n" + ruta); return; }
+                if (ext != "rcp" && ext != "rcs") { ResultadoVinculo(false, "La nube debe ser .rcp o .rcs: " + ruta); return; }
                 using (Transaction t = new Transaction(doc, "Vincular nube (Cortes nube)"))
                 {
                     t.Start();
@@ -2053,9 +2067,9 @@ namespace CortesNube
                     t.Commit();
                 }
                 sucio = true;
-                TaskDialog.Show("Cortes nube", "Nube vinculada en el proyecto (origen a origen interno):\n" + ruta + "\n\nAhora haz tus secciones.");
+                ResultadoVinculo(true, "Nube vinculada en " + doc.Title + " (origen a origen interno): " + Path.GetFileName(ruta));
             }
-            catch (Exception ex) { Log(ex.ToString()); TaskDialog.Show("Cortes nube", "No se pudo vincular la nube:\n" + ex.Message); }
+            catch (Exception ex) { Log(ex.ToString()); ResultadoVinculo(false, "No se pudo vincular la nube: " + ex.Message); }
         }
 
         public static string Carpeta
@@ -2081,9 +2095,8 @@ namespace CortesNube
             {
                 PointCloudInstance pc = el as PointCloudInstance;
                 if (pc == null) continue;
-                inv = pc.GetTransform().Inverse;
-                nube = pc.Name;
-                break;
+                if (nube == "SIN NUBE VINCULADA") { inv = pc.GetTransform().Inverse; nube = pc.Name; }
+                else nube += " + " + pc.Name;
             }
             // la transformacion de la nube ya pasa de pies (Revit) a metros (nube); sin nube hay que convertir
             double k = inv.OfVector(XYZ.BasisX).GetLength() > 0.9 ? PIE : 1.0;
@@ -2207,7 +2220,15 @@ function InstalarComplemento([bool]$forzar) {
     $tmpDll = Join-Path $env:TEMP "CortesNube_$($v.Anio).dll"
     $err = CompilarRevit $v $FUENTE_COMPLEMENTO $tmpDll $true
     if ($err) { $errores += "Revit $($v.Anio): no se pudo compilar el complemento.`n$err"; continue }
-    try { Copy-Item $tmpDll $dll -Force } catch { $errores += "Revit $($v.Anio): esta abierto. Cierralo y vuelve a abrir este programa para actualizar el complemento."; continue }
+    Get-ChildItem -LiteralPath $sub -Filter 'CortesNube.dll.viejo*' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    $enUso = $false
+    try { Copy-Item $tmpDll $dll -Force }
+    catch {
+      # Revit abierto tiene la DLL tomada: Windows deja renombrarla; la nueva se usa al reiniciar Revit
+      try { Rename-Item -LiteralPath $dll -NewName ('CortesNube.dll.viejo' + (Get-Date).Ticks); Copy-Item $tmpDll $dll -Force; $enUso = $true }
+      catch { $errores += "Revit $($v.Anio): esta abierto. Cierralo y vuelve a abrir este programa para actualizar el complemento."; continue }
+    }
+    if ($enUso) { $script:reiniciarRevit = $true }
     $xml = '<?xml version="1.0" encoding="utf-8"?>' + "`r`n<RevitAddIns>`r`n  <AddIn Type=`"Application`">`r`n    <Name>Cortes nube</Name>`r`n    <Assembly>$dll</Assembly>`r`n    <AddInId>6F1B2C3D-4E5F-4A7B-8C9D-0E1F2A3B4C5D</AddInId>`r`n    <FullClassName>CortesNube.App</FullClassName>`r`n    <VendorId>QHCN</VendorId>`r`n    <VendorDescription>Quinta Heeren - cortes de nube</VendorDescription>`r`n  </AddIn>`r`n</RevitAddIns>`r`n"
     [IO.File]::WriteAllText($man, $xml, (New-Object System.Text.UTF8Encoding($false)))
     [IO.File]::WriteAllText($marca, $firma)
@@ -2228,7 +2249,9 @@ if ($validos.Count -eq 0) {
 # ============================== VENTANA ==============================
 $fuente  = New-Object System.Drawing.Font('Segoe UI', 10)
 $fuenteB = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
+[CNWin]::AppId('QuintaHeeren.GeneradorCortes')
 $form = New-Object System.Windows.Forms.Form
+try { $exeIco = Get-ChildItem -LiteralPath $Root -Filter 'GeneradorCortes*.exe' -ErrorAction SilentlyContinue | Select-Object -First 1; if ($exeIco) { $form.Icon = [System.Drawing.Icon]::ExtractAssociatedIcon($exeIco.FullName) } } catch {}
 $form.Text = 'Generador de cortes  -  secciones de Revit + nube de puntos a AutoCAD  (Quinta Heeren)' + $(if ($env:CN_VERSION) { '   -   version ' + $env:CN_VERSION } else { '' })
 $form.Size = New-Object System.Drawing.Size(1000, 820)
 $form.StartPosition = 'CenterScreen'; $form.Font = $fuente
@@ -2526,7 +2549,14 @@ function ArmarDwg([string[]]$nombres, [string]$imgDir, [double]$px) {
     $dwg = Join-Path $DwgDir "Corte $L.dwg"
     if (Test-Path -LiteralPath $dwg) {
       try { $fs = [IO.File]::Open($dwg, 'Open', 'ReadWrite', 'None'); $fs.Close() }
-      catch { Log "Corte $L : 'Corte $L.dwg' esta abierto en AutoCAD. Cierralo y vuelve a intentar."; continue }
+      catch {
+        Log "Corte $L : 'Corte $L.dwg' esta abierto en AutoCAD. Cierralo y vuelve a intentar."
+        [System.Windows.Forms.MessageBox]::Show("'Corte $L.dwg' esta abierto en AutoCAD.`n`nCierralo (guarda si lo cambiaste) y vuelve a generar ese corte.", 'Generador de cortes', 'OK', 'Warning') | Out-Null
+        continue
+      }
+      # copia de seguridad del DWG anterior (por si lo habias retocado a mano)
+      $ant = Join-Path $DwgDir 'anteriores'
+      try { New-Item -ItemType Directory -Force -Path $ant | Out-Null; Copy-Item -LiteralPath $dwg -Destination (Join-Path $ant "Corte $L.dwg") -Force; Log "   (el DWG anterior se guardo en CORTES DWG\anteriores)" } catch {}
     }
     Paso "Armando 'Corte $L.dwg' en AutoCAD (se abre y se cierra solo; no copies ni pegues nada)..."
     $t0 = Get-Date
@@ -2544,6 +2574,33 @@ function ArmarDwg([string[]]$nombres, [string]$imgDir, [double]$px) {
 
 # Atajo: TIFF que ya tienes -> DWG (sin Revit). Los Corte_<n>_revit_conjunto/_rojo se juntan en un DWG por corte;
 # cualquier otro TIFF va solo en su propio DWG (si no esta georreferenciado se escala con sus ppp y la escala elegida).
+function DwgAbierto([string]$n) {
+  $f = Join-Path $DwgDir "Corte $n.dwg"
+  if (-not (Test-Path -LiteralPath $f)) { return $false }
+  try { $fs = [IO.File]::Open($f, 'Open', 'ReadWrite', 'None'); $fs.Close(); $false } catch { $true }
+}
+# pide a Revit que vincule la nube y espera la respuesta del complemento (vincular_listo.txt)
+function VincularEnRevit([string]$ruta) {
+  if (-not @(Get-Process -Name Revit -ErrorAction SilentlyContinue).Count) { [System.Windows.Forms.MessageBox]::Show('Abre Revit con tu proyecto y vuelve a intentarlo.', 'Vincular en Revit', 'OK', 'Warning') | Out-Null; return }
+  $listo = Join-Path (Split-Path $PedidoVinc -Parent) 'vincular_listo.txt'
+  New-Item -ItemType Directory -Force -Path (Split-Path $PedidoVinc -Parent) | Out-Null
+  Remove-Item -LiteralPath $listo -Force -ErrorAction SilentlyContinue
+  [IO.File]::WriteAllText($PedidoVinc, $ruta)
+  Paso "Revit esta vinculando $([IO.Path]::GetFileName($ruta))..."
+  $t0 = Get-Date
+  while (((Get-Date) - $t0).TotalSeconds -lt 90 -and -not (Test-Path -LiteralPath $listo)) { Start-Sleep -Milliseconds 300; [System.Windows.Forms.Application]::DoEvents() }
+  if (-not (Test-Path -LiteralPath $listo)) {
+    if (Test-Path -LiteralPath $PedidoVinc) { Remove-Item -LiteralPath $PedidoVinc -Force -ErrorAction SilentlyContinue; $m = 'Revit no respondio. Revisa que tu proyecto este abierto y que el complemento Cortes nube este cargado (si acabas de instalarlo, reinicia Revit).' }
+    else { $m = 'Revit recibio el pedido. Revisa en Revit si la nube quedo vinculada.' }
+    Paso $m; [System.Windows.Forms.MessageBox]::Show($m, 'Vincular en Revit', 'OK', 'Warning') | Out-Null; return
+  }
+  $r = (Get-Content -LiteralPath $listo -Raw).Trim(); Remove-Item -LiteralPath $listo -Force -ErrorAction SilentlyContinue
+  $ok = $r -like 'OK|*'; $m = $r -replace '^(OK|ERROR)\|', ''
+  Paso $m
+  if (-not $ok) { [System.Windows.Forms.MessageBox]::Show($m, 'Vincular en Revit', 'OK', 'Warning') | Out-Null }
+  else { Log '   (guarda el proyecto en Revit para que el vinculo quede)' }
+}
+
 # al terminar: abrir el DWG (un corte) o la carpeta CORTES DWG (varios)
 function OfrecerAbrir([string[]]$hechos) {
   $hechos = @($hechos | Where-Object { $_ }); if (-not $hechos.Count) { return }
@@ -2617,6 +2674,8 @@ function TiffACad {
     if ($nombres -notcontains $n) { $nombres += $n }
   }
   if (-not $nombres.Count) { return }
+  $abiertos = @($nombres | Where-Object { DwgAbierto $_ } | ForEach-Object { "Corte $_.dwg" })
+  if ($abiertos.Count) { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; [System.Windows.Forms.MessageBox]::Show("Estos DWG estan abiertos en AutoCAD:`n`n   $($abiertos -join "`n   ")`n`nCierralos (guarda si los cambiaste) y vuelve a intentarlo.", 'Generador de cortes', 'OK', 'Warning') | Out-Null; return }
   $script:trabajando = $true
   foreach ($c in $btnGen, $btnTiff, $lista, $btnHerr) { $c.Enabled = $false }
   try {
@@ -2636,11 +2695,21 @@ function TiffACad {
   if ($script:abrirLuego) { $x = $script:abrirLuego; $script:abrirLuego = $null; OfrecerAbrir $x }
 }
 
+# paso (m/pixel) que no pase el limite del motor (~1000 millones de pixeles por imagen)
+function PasoSeguro($k, [double]$paso) {
+  $area = [double]$k.Largo * [math]::Max(0.1, [double]($k.Zmax - $k.Zmin))
+  $minimo = [math]::Sqrt($area / 9.0e8)
+  if ($paso -lt $minimo) { [math]::Ceiling($minimo * 10000) / 10000 } else { $paso }
+}
+
 function Generar {
   $sel = @($lista.Items | Where-Object { $_.Checked })
   if ($sel.Count -eq 0) { [System.Windows.Forms.MessageBox]::Show('Marca al menos un corte en la lista.', 'Generador de cortes') | Out-Null; return }
   if (-not $AUTOCAD) { throw 'No encuentro AutoCAD instalado.' }
   foreach ($d in $TifDir, $DwgDir, $Tmp, $Png) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
+  # antes de leer la nube: los DWG que se van a rehacer no pueden estar abiertos en AutoCAD
+  $abiertos = @($sel | Where-Object { DwgAbierto $_.Text } | ForEach-Object { "Corte $($_.Text).dwg" })
+  if ($abiertos.Count) { [System.Windows.Forms.MessageBox]::Show("Estos DWG estan abiertos en AutoCAD:`n`n   $($abiertos -join "`n   ")`n`nCierralos (guarda si los cambiaste) y vuelve a pulsar GENERAR.", 'Generador de cortes', 'OK', 'Warning') | Out-Null; return }
   # los nombres salen de Revit (doble clic en la lista para cambiarlos); se guardan para la proxima vez
   foreach ($it in $sel) { GuardarNombre $it.Tag.Clave $it.Text }
   $px = PixelElegido; $ppp = [double]$cmbPpp.SelectedItem
@@ -2653,10 +2722,10 @@ function Generar {
   foreach ($it in $sel) {
     $p = $it.Tag; $k = $it.Text -replace '[^A-Za-z0-9_-]', '_'
     $rr = Join-Path $Tmp "raw_$($k)_rojo.tif"
-    $ped += [pscustomobject]@{ It = $it; Tipo = 'rojo'; Ruta = $rr }; $lin += [CNSec]::PedidoNube($p.Rojo, $p.Rojo.Dx, $p.Rojo.Dy, $pasoRojo, 0.004, $rr)
+    $ped += [pscustomobject]@{ It = $it; Tipo = 'rojo'; Ruta = $rr }; $pr = PasoSeguro $p.Rojo $pasoRojo; $lin += [CNSec]::PedidoNube($p.Rojo, $p.Rojo.Dx, $p.Rojo.Dy, $pr, [math]::Max(0.004, 2 * $pr), $rr)
     if ($p.Fondo) {
       $rf = Join-Path $Tmp "raw_$($k)_fondo.tif"
-      $ped += [pscustomobject]@{ It = $it; Tipo = 'fondo'; Ruta = $rf }; $lin += [CNSec]::PedidoNube($p.Fondo, $p.Rojo.Dx, $p.Rojo.Dy, $px, ($RELLENO / 2), $rf)
+      $ped += [pscustomobject]@{ It = $it; Tipo = 'fondo'; Ruta = $rf }; $pf = PasoSeguro $p.Fondo $px; if ($pf -gt $px) { Log "   $($it.Text): corte muy largo, el fondo se lee a $([math]::Round($pf*1000,1)) mm/pixel" }; $lin += [CNSec]::PedidoNube($p.Fondo, $p.Rojo.Dx, $p.Rojo.Dy, $pf, [math]::Max($RELLENO / 2, 2 * $pf), $rf)
     }
     $it.SubItems[5].Text = 'Esperando a Revit...'
   }
@@ -2728,7 +2797,9 @@ $btnAyuda.Add_Click({
 $lista.Add_DoubleClick({
   if ($script:trabajando -or -not $lista.SelectedItems.Count) { return }
   $it = $lista.SelectedItems[0]; $p = $it.Tag
+  $it.Checked = -not $it.Checked   # el doble clic de la lista cambia la marca: se deja como estaba
   $n = PedirNombre $p $it.Text
+  if ($n -and @($lista.Items | Where-Object { $_ -ne $it -and $_.Text -ieq $n }).Count) { [System.Windows.Forms.MessageBox]::Show("Ya hay otro corte llamado '$n'. Elige otro nombre.", 'Nombre del corte', 'OK', 'Warning') | Out-Null; return }
   if ($n) { GuardarNombre $p.Clave $n; $it.Text = $n; $it.Checked = -not (YaHecho $p $n); $it.SubItems[5].Text = $(if (YaHecho $p $n) { "Ya generado: Corte $n.dwg" } else { 'Nuevo / cambiado: se generara' }) }
 })
 $btnReinst.Add_Click({
@@ -2815,9 +2886,7 @@ $btnLas.Add_Click({
     Log "   Listo: $($rcp.FullName)  (y su carpeta con los .rcs)"
     Paso "Nube convertida: $($rcp.Name)"
     if ([System.Windows.Forms.MessageBox]::Show("Nube convertida:`n$($rcp.FullName)`n`nVincularla ahora en tu proyecto de Revit abierto (origen a origen interno)?", 'Convertir nube', 'YesNo', 'Question') -eq 'Yes') {
-      New-Item -ItemType Directory -Force -Path (Split-Path $PedidoVinc -Parent) | Out-Null
-      [IO.File]::WriteAllText($PedidoVinc, $rcp.FullName)
-      Log "Pedido a Revit: vincular $($rcp.FullName)"
+      VincularEnRevit $rcp.FullName
     }
   } finally { $btnLas.Enabled = $true; $btnGen.Enabled = $true }
 })
@@ -2827,10 +2896,7 @@ $btnVinc.Add_Click({
   $d.Filter = 'Nube de ReCap (*.rcp;*.rcs)|*.rcp;*.rcs'
   if ($NUBE) { $d.InitialDirectory = Split-Path $NUBE -Parent }
   if ($d.ShowDialog() -ne 'OK') { return }
-  New-Item -ItemType Directory -Force -Path (Split-Path $PedidoVinc -Parent) | Out-Null
-  [IO.File]::WriteAllText($PedidoVinc, $d.FileName)
-  Log "Pedido a Revit: vincular $($d.FileName)"
-  [System.Windows.Forms.MessageBox]::Show("Listo. Ve a Revit (con tu proyecto abierto) y haz clic en la ventana:`nen unos segundos la nube queda vinculada en origen a origen interno.`n`n(Hace falta que Revit tenga el complemento 'Cortes nube' cargado.)", 'Vincular en Revit', 'OK', 'Information') | Out-Null
+  VincularEnRevit $d.FileName
 })
 $cmbPpp.Add_SelectedIndexChanged({ MostrarPixel })
 $cmbEsc.Add_SelectedIndexChanged({ MostrarPixel })
@@ -2874,7 +2940,8 @@ $form.Add_Shown({
     $r = InstalarComplemento $false
     if ($r.Hechos.Count) {
       Log "Complemento 'Cortes nube' instalado en: $($r.Hechos -join ', ')"
-      [System.Windows.Forms.MessageBox]::Show("Se instalo el complemento 'Cortes nube' en $($r.Hechos -join ', ').`n`nCierra Revit (guarda tu trabajo) y vuelve a abrirlo.`nSi Revit pregunta por el complemento, elige 'Cargar siempre'.`n`nDesde entonces tus secciones apareceran solas en esta ventana.", 'Complemento de Revit', 'OK', 'Information') | Out-Null
+      if ($script:reiniciarRevit) { Log "   Hay una mejora del complemento: se usara la proxima vez que abras Revit (puedes seguir trabajando)." }
+      else { [System.Windows.Forms.MessageBox]::Show("Se instalo el complemento 'Cortes nube' en $($r.Hechos -join ', ').`n`nCierra Revit (guarda tu trabajo) y vuelve a abrirlo.`nSi Revit pregunta por el complemento, elige 'Cargar siempre'.`n`nDesde entonces tus secciones apareceran solas en esta ventana.", 'Complemento de Revit', 'OK', 'Information') | Out-Null }
     }
     foreach ($e in $r.Errores) { if ($e -like '(info)*') { Log $e.Substring(7) } else { Log "AVISO complemento: $e" } }
   } catch { Log "AVISO complemento: $($_.Exception.Message)" }

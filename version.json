@@ -1,10 +1,10 @@
 {
- "version": "2026.11.26.1",
- "fecha": "2026-11-26 07:10",
- "notas": "Mas facil: acceso directo en escritorio y menu Inicio, sin dialogo de nombres (usa los de Revit), guia de 3 pasos al abrir, y al terminar ofrece abrir el DWG o la carpeta.",
+ "version": "2026.11.26.2",
+ "fecha": "2026-11-26 07:45",
+ "notas": "Probada a fondo: cortes largos ya no fallan, vincular nube sin ventanas en Revit, el complemento se renueva sin cerrar Revit, aviso inmediato si el DWG esta abierto, copia del DWG anterior, icono propio en la barra de tareas, doble clic ya no cambia la marca, nombres repetidos bloqueados.",
  "min_lanzador": 1,
  "archivos": {
-  "GENERADOR_DE_CORTES.bat": "5a90d4dd1ef6d5919e26df8fd3fb7488b1b359a20f61a7396da069c3951b2c30",
-  "LEEME_CORTES_REVIT.txt": "cebf2fe0f5590ba17baabe8339cde7d6f81838084fe6f90a973a4a401a852aa5"
+  "GENERADOR_DE_CORTES.bat": "1444d8055425c893a684850a1f0d8c2ea8e4e663462440a7595128cf94181b60",
+  "LEEME_CORTES_REVIT.txt": "b69f792e40bb8d2e527ec10bbe2172ed6a8346dd93d2b43210bf71e515ecf36d"
  }
 }

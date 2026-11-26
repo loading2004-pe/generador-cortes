@@ -14,7 +14,7 @@ AL ABRIR (automatico)
     carpeta de .rcs junto al archivo original y ofrece vincularlo en Revit. Si DeCap no acepta un .laz, primero
     lo pasa a .las con CloudCompare.
   - "Vincular en Revit": elige el .rcp/.rcs y el complemento lo vincula solo en tu proyecto abierto
-    (origen a origen interno).
+    (origen a origen interno), sin tocar Revit; la ventana dice cuando quedo. Luego guarda el proyecto en Revit.
 
 1. EN REVIT, por cada corte, DOS secciones sobre la misma linea:
   - una CORTA (desfase lejano p. ej. 0.10 m) = LINEA DE CORTE (rojo)
@@ -29,6 +29,9 @@ AL ABRIR (automatico)
    Pulsa GENERAR CORTES: ya no pregunta nombres. Cada corte se llama como su seccion de Revit (o una letra);
    doble clic en la lista para cambiarlo. Cada corte = su propio DWG: "Corte <nombre>.dwg".
    Al terminar ofrece abrir el DWG en AutoCAD (un corte) o la carpeta CORTES DWG (varios).
+   Si el DWG ya existia, la version anterior se guarda en CORTES DWG\anteriores (por si lo retocaste).
+   Si un DWG esta abierto en AutoCAD, avisa ANTES de empezar: cierralo y vuelve a pulsar GENERAR.
+   Cortes muy largos (mas de ~60 m): la imagen se lee con un pixel algo mayor para que quepa.
 
 RESULTADO
   CORTES DWG\Corte <nombre>.dwg : escala real en metros, imagenes INCRUSTADAS y agrupadas (1 clic = 1 imagen; se usa sin los TIFF)
