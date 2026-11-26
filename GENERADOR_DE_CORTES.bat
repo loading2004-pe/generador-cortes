@@ -1395,6 +1395,16 @@ public static class CNSec
     }
     public static string Firma(Par p) { return (p.Rojo != null ? p.Rojo.Fila : "") + "|" + (p.Fondo != null ? p.Fondo.Fila : "") + "|" + (p.Rojo != null ? p.Rojo.Fondo.ToString(Inv) : ""); }
 
+
+    // pedido al complemento para rasterizar los puntos reales de la nube dentro de la caja de la seccion
+    public static string PedidoNube(CNRev.Corte c, double refDx, double refDy, double paso, double relleno, string ruta)
+    {
+        double[] v = Campos(c.Fila);
+        double[] q = { v[0], v[1], v[2], v[3], v[4], v[5], c.Fondo, c.Zmin, c.Zmax, refDx, refDy, paso, relleno };
+        System.Text.StringBuilder sb = new System.Text.StringBuilder(ruta);
+        foreach (double d in q) sb.Append('|').Append(d.ToString("R", Inv));
+        return sb.ToString();
+    }
     // ------------------------------------------------------------------ imagenes exportadas por Revit
     static double[] Campos(string fila)
     {
@@ -1519,7 +1529,250 @@ $PedidoVinc = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'CortesNub
 $AUTOCAD = (Get-ChildItem 'C:\Program Files\Autodesk\AutoCAD*\acad.exe' -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1).FullName
 
 # ======================= COMPLEMENTO DE REVIT (se compila e instala solo) =======================
-$VERSION_COMPLEMENTO = 'fb64557677'
+$VERSION_MOTOR = 'f598ce1998'
+$FUENTE_MOTOR = @'
+// CortesNubeMotor: lee los puntos de la nube vinculada dentro de la caja de cada seccion y escribe TIFF crudos.
+// Lo carga CortesNube.dll desde bytes (se puede actualizar con Revit abierto).
+using System;
+using System.IO;
+using System.Text;
+using System.Globalization;
+using System.Collections.Generic;
+using Autodesk.Revit.DB;
+using Autodesk.Revit.DB.PointClouds;
+
+namespace CortesNubeMotor
+{
+    public static class Motor
+    {
+        static string carpetaLog;
+        static void Log(string m) { try { File.AppendAllText(Path.Combine(carpetaLog, "complemento_log.txt"), DateTime.Now.ToString("s") + "  " + m + "\r\n"); } catch (Exception) { } }
+
+        // ---------------------------------------------------------------- nube -> TIFF crudo (sin CloudCompare)
+        // Lee los puntos REALES de la nube vinculada (PointCloudInstance.GetPoints) dentro de la caja de cada
+        // seccion y los rasteriza: punto mas cercano a quien mira (como CloudCompare PROJ MIN) y relleno de huecos.
+        // linea: ruta|ax|ay|bx|by|dx|dy|prof|zlo|zhi|refdx|refdy|paso|relleno   (todo en metros de la nube "G")
+        public static void Nubes(Document doc, string[] lineas, string Carpeta)
+        {
+            carpetaLog = Carpeta;
+            Log("motor v6");
+            StringBuilder res = new StringBuilder();
+            List<PointCloudInstance> pcs = new List<PointCloudInstance>();
+            foreach (Element el in new FilteredElementCollector(doc).OfClass(typeof(PointCloudInstance))) { PointCloudInstance q = el as PointCloudInstance; if (q != null) pcs.Add(q); }
+            foreach (string raw in lineas)
+            {
+                string l = raw.Trim(); if (l.Length == 0) continue;
+                string[] p = l.Split('|');
+                try
+                {
+                    if (pcs.Count == 0) throw new Exception("el proyecto abierto no tiene una nube de puntos vinculada");
+                    if (p.Length < 14) throw new Exception("pedido mal formado");
+                    double[] v = new double[13];
+                    for (int i = 0; i < 13; i++) v[i] = double.Parse(p[i + 1], CultureInfo.InvariantCulture);
+                    string info = Rasterizar(pcs, p[0], v);
+                    res.Append(p[0]).Append("|OK|").Append(info).Append("\r\n");
+                }
+                catch (Exception ex) { Log(ex.ToString()); res.Append(p[0]).Append("|ERROR|").Append(ex.Message.Replace("\r", " ").Replace("\n", " ")).Append("\r\n"); }
+            }
+            string listo = Path.Combine(Carpeta, "nube_listo.txt");
+            File.WriteAllText(listo + ".tmp", res.ToString(), Encoding.UTF8);
+            if (File.Exists(listo)) File.Delete(listo);
+            File.Move(listo + ".tmp", listo);
+        }
+
+        class Caja { public double ax, ay, tx, ty, dx, dy, len, prof, zlo, zhi, rx, ry; }
+
+        // Una nube vinculada. El espacio "G" (metros del generador) se define con la PRIMERA nube: G = k1 * inv1(M).
+        // modoF: 0 filtro en coords de la nube, 1 igual con normales al reves, 2 filtro en coords del modelo.
+        // modoP: 0 los puntos vienen en coords de la nube (M = T(p)), 1 vienen en coords del modelo (M = p).
+        class Nube { public PointCloudInstance pc; public Transform T; public int modoF = -1, modoP = 0; public long total; }
+        static Transform G1inv; static double G1k;
+        static double[] AG(XYZ m, int color) { XYZ g = G1inv.OfPoint(m); return new double[] { g.X * G1k, g.Y * G1k, g.Z * G1k, color }; }
+        static XYZ DeG(double x, double y, double z) { return G1inv.Inverse.OfPoint(new XYZ(x / G1k, y / G1k, z / G1k)); }   // G -> modelo
+
+        static List<Plane> Planos(Nube n, Caja c, double t0, double t1, double u0, double u1)
+        {
+            List<double[]> defs = new List<double[]>();     // origen (G) y normal hacia ADENTRO (G)
+            defs.Add(new double[] { c.ax + c.tx * t0, c.ay + c.ty * t0, 0, c.tx, c.ty, 0 });
+            defs.Add(new double[] { c.ax + c.tx * t1, c.ay + c.ty * t1, 0, -c.tx, -c.ty, 0 });
+            defs.Add(new double[] { c.ax, c.ay, 0, c.dx, c.dy, 0 });
+            defs.Add(new double[] { c.ax + c.dx * c.prof, c.ay + c.dy * c.prof, 0, -c.dx, -c.dy, 0 });
+            defs.Add(new double[] { c.ax, c.ay, c.zlo, 0, 0, 1 });
+            defs.Add(new double[] { c.ax, c.ay, c.zhi, 0, 0, -1 });
+            defs.Add(new double[] { c.rx * u0, c.ry * u0, 0, c.rx, c.ry, 0 });
+            defs.Add(new double[] { c.rx * u1, c.ry * u1, 0, -c.rx, -c.ry, 0 });
+            Transform ninv = n.T.Inverse;
+            List<Plane> pl = new List<Plane>();
+            foreach (double[] d in defs)
+            {
+                XYZ o = DeG(d[0], d[1], d[2]);                                        // modelo
+                XYZ q = DeG(d[0] + d[3], d[1] + d[4], d[2] + d[5]);
+                XYZ nv = (q - o).Normalize();
+                if (n.modoF != 2) { o = ninv.OfPoint(o); nv = ninv.OfVector(nv).Normalize(); }   // coords de la nube
+                if (n.modoF == 1) nv = nv.Negate();
+                pl.Add(Plane.CreateByNormalAndOrigin(nv, o));
+            }
+            return pl;
+        }
+
+        static double[] Punto(Nube n, CloudPoint q)
+        {
+            XYZ p = new XYZ(q.X, q.Y, q.Z);
+            return AG(n.modoP == 0 ? n.T.OfPoint(p) : p, q.Color);
+        }
+
+        static void Pedir(Nube n, Caja c, double t0, double t1, double u0, double u1, double paso, List<double[]> r, int prof)
+        {
+            const int TOPE = 900000;
+            PointCloudFilter f = PointCloudFilterFactory.CreateMultiPlaneFilter(Planos(n, c, t0, t1, u0, u1));
+            PointCollection pts = n.pc.GetPoints(f, Math.Max(paso * 0.7 / 0.3048, 1e-5), TOPE);
+            if (pts.Count >= TOPE * 0.98 && prof < 12 && (t1 - t0) > 0.02)
+            {
+                double tm = (t0 + t1) / 2;
+                Pedir(n, c, t0, tm, u0, u1, paso, r, prof + 1);
+                Pedir(n, c, tm, t1, u0, u1, paso, r, prof + 1);
+                return;
+            }
+            foreach (CloudPoint q in pts) r.Add(Punto(n, q));
+        }
+
+        static bool Dentro(Caja c, double[] g, double holgura)
+        {
+            double px = g[0] - c.ax, py = g[1] - c.ay;
+            double t = px * c.tx + py * c.ty, d = px * c.dx + py * c.dy;
+            return t > -holgura && t < c.len + holgura && d > -holgura && d < c.prof + holgura && g[2] > c.zlo - holgura && g[2] < c.zhi + holgura;
+        }
+
+        static string Rasterizar(List<PointCloudInstance> pcs, string ruta, double[] v)
+        {
+            G1inv = pcs[0].GetTransform().Inverse;
+            G1k = G1inv.OfVector(XYZ.BasisX).GetLength() > 0.9 ? 0.3048 : 1.0;
+            Caja c = new Caja();
+            c.ax = v[0]; c.ay = v[1];
+            double bx = v[2], by = v[3];
+            c.len = Math.Sqrt((bx - c.ax) * (bx - c.ax) + (by - c.ay) * (by - c.ay));
+            if (c.len < 1e-6) throw new Exception("seccion sin largo");
+            c.tx = (bx - c.ax) / c.len; c.ty = (by - c.ay) / c.len;
+            double dl = Math.Sqrt(v[4] * v[4] + v[5] * v[5]); c.dx = v[4] / dl; c.dy = v[5] / dl;
+            c.prof = v[6]; c.zlo = v[7]; c.zhi = v[8];
+            double rl = Math.Sqrt(v[9] * v[9] + v[10] * v[10]);
+            c.rx = v[10] / rl; c.ry = -v[9] / rl;              // derecha del marco de referencia = (dy, -dx)
+            double paso = v[11], relleno = v[12];
+            double uA = c.rx * c.ax + c.ry * c.ay, uB = c.rx * bx + c.ry * by;
+            double U0 = Math.Min(uA, uB), U1 = Math.Max(uA, uB);
+            int W = (int)Math.Ceiling((U1 - U0) / paso), H = (int)Math.Ceiling((c.zhi - c.zlo) / paso);
+            if ((long)W * H * 3 > 3500000000L) throw new Exception("imagen demasiado grande (" + W + " x " + H + ")");
+            int R = Math.Max(1, (int)Math.Round(relleno / paso));
+
+            // cada nube: se prueba con una muestra que combinacion de coordenadas devuelve puntos DENTRO de la caja
+            List<Nube> nubes = new List<Nube>();
+            foreach (PointCloudInstance pc in pcs)
+            {
+                Nube n = new Nube(); n.pc = pc; n.T = pc.GetTransform();
+                int mejor = 0;
+                for (int mf = 0; mf < 3; mf++)
+                {
+                    try
+                    {
+                        n.modoF = mf;
+                        PointCollection pts = pc.GetPoints(PointCloudFilterFactory.CreateMultiPlaneFilter(Planos(n, c, 0, c.len, U0 - 1, U1 + 1)), 0.05 / 0.3048, 3000);
+                        int[] dentro = new int[2]; int tot = 0;
+                        foreach (CloudPoint q in pts)
+                        {
+                            tot++;
+                            for (int mp = 0; mp < 2; mp++) { n.modoP = mp; if (Dentro(c, Punto(n, q), 0.05)) dentro[mp]++; }
+                        }
+                        Log("nube '" + pc.Name + "' filtro " + mf + ": " + tot + " puntos, dentro " + dentro[0] + "/" + dentro[1]);
+                        for (int mp = 0; mp < 2; mp++) if (tot > 0 && dentro[mp] >= tot * 0.9 && dentro[mp] > mejor) { mejor = dentro[mp]; n.total = mf * 10 + mp + 1; }
+                    }
+                    catch (Exception ex) { Log("nube '" + pc.Name + "' filtro " + mf + ": " + ex.Message); }
+                }
+                if (n.total > 0) { n.modoF = (int)((n.total - 1) / 10); n.modoP = (int)((n.total - 1) % 10); n.total = 0; nubes.Add(n); Log("  usando filtro " + n.modoF + ", puntos " + n.modoP); }
+            }
+            if (nubes.Count == 0) throw new Exception("ninguna nube vinculada tiene puntos dentro de esta seccion (revisa que la nube se vea en la seccion)");
+
+            using (FileStream fo = new FileStream(ruta, FileMode.Create, FileAccess.ReadWrite))
+            {
+                BinaryWriter bw = new BinaryWriter(fo);
+                bw.Write((ushort)0x4949); bw.Write((ushort)42); bw.Write((uint)0);
+                long pDatos = 8, total = (long)W * H * 3;
+                fo.SetLength(pDatos + total);
+                const int TW = 256;
+                long npts = 0, nPix = 0;
+                for (int x0 = 0; x0 < W; x0 += TW)
+                {
+                    int x1 = Math.Min(W, x0 + TW), ex0 = x0 - R, tw = (x1 - x0) + 2 * R;
+                    double tu0 = U0 + ex0 * paso, tu1 = U0 + (x1 + R) * paso;
+                    int[] col = new int[tw * H]; float[] prof = new float[tw * H];
+                    for (int i = 0; i < col.Length; i++) { col[i] = -1; prof[i] = float.MaxValue; }
+                    List<double[]> pts = new List<double[]>();
+                    foreach (Nube n in nubes) Pedir(n, c, 0, c.len, tu0, tu1, paso, pts, 0);
+                    foreach (double[] g in pts)
+                    {
+                        double u = c.rx * g[0] + c.ry * g[1];
+                        int x = (int)Math.Floor((u - U0) / paso) - ex0, y = (int)Math.Floor((c.zhi - g[2]) / paso);
+                        if (x < 0 || x >= tw || y < 0 || y >= H) continue;
+                        float d = (float)((g[0] - c.ax) * c.dx + (g[1] - c.ay) * c.dy);
+                        int i = y * tw + x;
+                        if (d < prof[i]) { prof[i] = d; col[i] = ((int)g[3]) & 0xFFFFFF; }
+                    }
+                    npts += pts.Count; pts = null; prof = null;
+                    // relleno: promedio de los vecinos con dato dentro de R pixeles (tabla de sumas por columnas)
+                    int[] sr = new int[tw], sg = new int[tw], sb = new int[tw], sn = new int[tw];
+                    byte[] fila = new byte[(x1 - x0) * 3];
+                    for (int y = -R; y < H; y++)
+                    {
+                        int ya = y + R;                               // fila que entra
+                        if (ya < H) for (int x = 0; x < tw; x++) { int q = col[ya * tw + x]; if (q >= 0) { sr[x] += q & 255; sg[x] += (q >> 8) & 255; sb[x] += (q >> 16) & 255; sn[x]++; } }
+                        int ys = y - R - 1;                           // fila que sale
+                        if (ys >= 0) for (int x = 0; x < tw; x++) { int q = col[ys * tw + x]; if (q >= 0) { sr[x] -= q & 255; sg[x] -= (q >> 8) & 255; sb[x] -= (q >> 16) & 255; sn[x]--; } }
+                        if (y < 0) continue;
+                        int ar = 0, ag = 0, ab = 0, an = 0;
+                        for (int x = 0; x < 2 * R; x++) { ar += sr[x]; ag += sg[x]; ab += sb[x]; an += sn[x]; }
+                        for (int cx = R; cx < tw - R; cx++)
+                        {
+                            int xe = cx + R; ar += sr[xe]; ag += sg[xe]; ab += sb[xe]; an += sn[xe];
+                            if (cx - R - 1 >= 0) { int xs = cx - R - 1; ar -= sr[xs]; ag -= sg[xs]; ab -= sb[xs]; an -= sn[xs]; }
+                            int o = (cx - R) * 3, q = col[y * tw + cx];
+                            byte r8, g8, b8;
+                            if (q >= 0) { r8 = (byte)(q & 255); g8 = (byte)((q >> 8) & 255); b8 = (byte)((q >> 16) & 255); }
+                            else if (an >= 3) { r8 = (byte)(ar / an); g8 = (byte)(ag / an); b8 = (byte)(ab / an); }
+                            else { fila[o] = 0; fila[o + 1] = 0; fila[o + 2] = 0; continue; }
+                            if (r8 == 0 && g8 == 0 && b8 == 0) { r8 = 1; g8 = 1; b8 = 1; }
+                            fila[o] = r8; fila[o + 1] = g8; fila[o + 2] = b8; nPix++;
+                        }
+                        fo.Position = pDatos + ((long)y * W + x0) * 3;
+                        fo.Write(fila, 0, fila.Length);
+                    }
+                    col = null;
+                }
+                fo.Position = pDatos + total;
+                long pBits = fo.Position; for (int i = 0; i < 3; i++) bw.Write((ushort)8);
+                long pScale = fo.Position; bw.Write(paso); bw.Write(paso); bw.Write(0.0);
+                long pTie = fo.Position; bw.Write(0.0); bw.Write(0.0); bw.Write(0.0); bw.Write(U0); bw.Write(c.zhi); bw.Write(0.0);
+                if ((fo.Position & 1) == 1) bw.Write((byte)0);
+                long pIfd = fo.Position;
+                uint[][] tags = new uint[][] {
+                    new uint[] { 256, 4, 1, (uint)W }, new uint[] { 257, 4, 1, (uint)H }, new uint[] { 258, 3, 3, (uint)pBits },
+                    new uint[] { 259, 3, 1, 1 }, new uint[] { 262, 3, 1, 2 }, new uint[] { 273, 4, 1, (uint)pDatos },
+                    new uint[] { 277, 3, 1, 3 }, new uint[] { 278, 4, 1, (uint)H }, new uint[] { 279, 4, 1, (uint)total },
+                    new uint[] { 284, 3, 1, 1 }, new uint[] { 33550, 12, 3, (uint)pScale }, new uint[] { 33922, 12, 6, (uint)pTie } };
+                bw.Write((ushort)tags.Length);
+                foreach (uint[] t in tags)
+                {
+                    bw.Write((ushort)t[0]); bw.Write((ushort)t[1]); bw.Write(t[2]);
+                    if (t[1] == 3 && t[2] == 1) { bw.Write((ushort)t[3]); bw.Write((ushort)0); } else bw.Write(t[3]);
+                }
+                bw.Write((uint)0);
+                fo.Position = 4; bw.Write((uint)pIfd); bw.Flush();
+                return W + " x " + H + " px, " + npts + " puntos de " + nubes.Count + " nube(s), " + nPix + " pixeles con dato";
+            }
+        }
+
+    }
+}
+'@
+$VERSION_COMPLEMENTO = '398a8e5000'
 $FUENTE_COMPLEMENTO = @'
 // Complemento de Revit "Cortes nube" (Quinta Heeren)
 // Escribe en vivo las SECCIONES del proyecto abierto en  Documentos\CortesNube\secciones_revit.txt
@@ -1531,6 +1784,7 @@ using System.Globalization;
 using System.Collections.Generic;
 using Autodesk.Revit.Attributes;
 using Autodesk.Revit.DB;
+using Autodesk.Revit.DB.PointClouds;
 using Autodesk.Revit.DB.Events;
 using Autodesk.Revit.UI;
 using Autodesk.Revit.UI.Events;
@@ -1585,7 +1839,7 @@ namespace CortesNube
             try
             {
                 if (evento == null) return;
-                if (File.Exists(Path.Combine(Carpeta, "vincular_nube.txt")) || File.Exists(Path.Combine(Carpeta, "exportar_imagenes.txt")))
+                if (File.Exists(Path.Combine(Carpeta, "vincular_nube.txt")) || File.Exists(Path.Combine(Carpeta, "exportar_imagenes.txt")) || File.Exists(Path.Combine(Carpeta, "exportar_nube.txt")))
                 {
                     evento.Raise();
                     if (ventana != IntPtr.Zero) PostMessage(ventana, 0, IntPtr.Zero, IntPtr.Zero);
@@ -1604,6 +1858,13 @@ namespace CortesNube
                 string ruta = "";
                 try { ruta = File.ReadAllText(pedido).Trim(); File.Delete(pedido); } catch (Exception) { }
                 if (ruta.Length > 0) Vincular(doc, ruta);
+            }
+            pedido = Path.Combine(Carpeta, "exportar_nube.txt");
+            if (File.Exists(pedido))
+            {
+                string[] lineas = null;
+                try { lineas = File.ReadAllLines(pedido); File.Delete(pedido); } catch (Exception) { }
+                if (lineas != null) Nubes(doc, lineas);
             }
             pedido = Path.Combine(Carpeta, "exportar_imagenes.txt");
             if (File.Exists(pedido))
@@ -1701,6 +1962,38 @@ namespace CortesNube
             File.WriteAllText(listo + ".tmp", res.ToString(), Encoding.UTF8);
             if (File.Exists(listo)) File.Delete(listo);
             File.Move(listo + ".tmp", listo);
+        }
+
+        // ---------------------------------------------------------------- motor (se recarga sin reiniciar Revit)
+        // La lectura de la nube vive en CortesNubeMotor.dll (junto a este .dll). Se carga desde bytes, asi el
+        // generador puede actualizarla con Revit abierto: la siguiente vez se usa la nueva.
+        static System.Reflection.MethodInfo motorNubes; static DateTime motorFecha = DateTime.MinValue;
+        static void Nubes(Document doc, string[] lineas)
+        {
+            string dll = Path.Combine(Path.GetDirectoryName(typeof(App).Assembly.Location), "CortesNubeMotor.dll");
+            try
+            {
+                if (!File.Exists(dll)) throw new Exception("falta CortesNubeMotor.dll: vuelve a abrir el generador de cortes");
+                DateTime f = File.GetLastWriteTimeUtc(dll);
+                if (motorNubes == null || f != motorFecha)
+                {
+                    System.Reflection.Assembly asm = System.Reflection.Assembly.Load(File.ReadAllBytes(dll));
+                    motorNubes = asm.GetType("CortesNubeMotor.Motor").GetMethod("Nubes");
+                    motorFecha = f;
+                }
+                motorNubes.Invoke(null, new object[] { doc, lineas, Carpeta });
+            }
+            catch (Exception ex)
+            {
+                Exception e = ex is System.Reflection.TargetInvocationException && ex.InnerException != null ? ex.InnerException : ex;
+                Log(e.ToString());
+                StringBuilder res = new StringBuilder();
+                foreach (string l in lineas) if (l.Trim().Length > 0) res.Append(l.Split('|')[0]).Append("|ERROR|").Append(e.Message.Replace("\r", " ").Replace("\n", " ")).Append("\r\n");
+                string listo = Path.Combine(Carpeta, "nube_listo.txt");
+                File.WriteAllText(listo + ".tmp", res.ToString(), Encoding.UTF8);
+                if (File.Exists(listo)) File.Delete(listo);
+                File.Move(listo + ".tmp", listo);
+            }
         }
 
         static void Probar(Action a) { try { a(); } catch (Exception) { } }
@@ -1843,38 +2136,54 @@ function VersionesRevit {
   }
   @($r | Sort-Object Anio)
 }
-function InstalarComplemento([bool]$forzar) {
-  $hechos = @(); $errores = @()
+# compila un .cs contra la API de un Revit; devuelve '' si salio bien o el mensaje del compilador
+function CompilarRevit($v, [string]$fuente, [string]$salidaDll, [bool]$conUI) {
   $csc = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
   if (-not (Test-Path $csc)) { $csc = 'C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe' }
-  # runtimes .NET de menor a mayor: se usa el primero con el que compila (Revit 2025 = .NET 8, Revit 2026.5 = .NET 10)
-  $cores = @(Get-ChildItem 'C:\Program Files\dotnet\shared\Microsoft.NETCore.App' -Directory -ErrorAction SilentlyContinue | Sort-Object { try { [version]($_.Name -replace '-.*', '') } catch { [version]'0.0' } })
+  $api = Join-Path $v.Carpeta 'RevitAPI.dll'; $apiui = Join-Path $v.Carpeta 'RevitAPIUI.dll'
+  $src = Join-Path $env:TEMP ('CN_' + [IO.Path]::GetFileNameWithoutExtension($salidaDll) + '.cs'); [IO.File]::WriteAllText($src, $fuente)
+  $rv = @("/r:`"$api`""); if ($conUI) { $rv += "/r:`"$apiui`"" }
+  $salida = ''
+  if ($v.Anio -le 2024) {
+    Remove-Item $salidaDll -Force -ErrorAction SilentlyContinue
+    $a = @('/nologo', '/target:library', '/optimize+', "/out:`"$salidaDll`"") + $rv + "`"$src`""
+    $salida = & $csc @a 2>&1 | Out-String
+    if (Test-Path $salidaDll) { return '' }
+  } else {
+    $cores = @(Get-ChildItem 'C:\Program Files\dotnet\shared\Microsoft.NETCore.App' -Directory -ErrorAction SilentlyContinue | Sort-Object { try { [version]($_.Name -replace '-.*', '') } catch { [version]'0.0' } })
+    foreach ($core in $cores) {
+      Remove-Item $salidaDll -Force -ErrorAction SilentlyContinue
+      $refs = @('System.Private.CoreLib.dll', 'System.Runtime.dll', 'System.Collections.dll', 'System.Runtime.Extensions.dll', 'netstandard.dll', 'mscorlib.dll', 'System.Text.Encoding.Extensions.dll') | ForEach-Object { Join-Path $core.FullName $_ } | Where-Object { Test-Path $_ }
+      $a = @('/nologo', '/nostdlib+', '/noconfig', '/target:library', '/optimize+', "/out:`"$salidaDll`"") + ($refs | ForEach-Object { "/r:`"$_`"" }) + $rv + "`"$src`""
+      $salida = & $csc @a 2>&1 | Out-String
+      if (Test-Path $salidaDll) { return '' }
+    }
+  }
+  if (-not $salida) { $salida = 'no se pudo compilar' }
+  return $salida
+}
+
+function InstalarComplemento([bool]$forzar) {
+  $hechos = @(); $errores = @()
   foreach ($v in (VersionesRevit)) {
     if ($v.Anio -lt $REVIT_MINIMO) { continue }
-    $api = Join-Path $v.Carpeta 'RevitAPI.dll'; $apiui = Join-Path $v.Carpeta 'RevitAPIUI.dll'
     $dir = Join-Path $env:APPDATA "Autodesk\Revit\Addins\$($v.Anio)"; $sub = Join-Path $dir 'CortesNube'
     $dll = Join-Path $sub 'CortesNube.dll'; $man = Join-Path $dir 'CortesNube.addin'; $marca = Join-Path $sub 'version.txt'
+    New-Item -ItemType Directory -Force -Path $sub | Out-Null
+    # 1) motor (lectura de la nube): se puede cambiar con Revit abierto, no hace falta reiniciarlo
+    $mdll = Join-Path $sub 'CortesNubeMotor.dll'; $mmarca = Join-Path $sub 'motor.txt'; $mfirma = "$VERSION_MOTOR|$($v.Version)"
+    if ($forzar -or -not (Test-Path $mdll) -or -not (Test-Path $mmarca) -or ((Get-Content $mmarca -Raw).Trim() -ne $mfirma)) {
+      $tmpM = Join-Path $env:TEMP "CortesNubeMotor_$($v.Anio).dll"
+      $err = CompilarRevit $v $FUENTE_MOTOR $tmpM $false
+      if ($err) { $errores += "Revit $($v.Anio): no se pudo compilar el motor.`n$err" }
+      else { try { Copy-Item $tmpM $mdll -Force; (Get-Item $mdll).LastWriteTime = Get-Date; [IO.File]::WriteAllText($mmarca, $mfirma); $errores += "(info) motor actualizado en Revit $($v.Anio) ($VERSION_MOTOR)" } catch { $errores += "Revit $($v.Anio): no se pudo copiar el motor: $($_.Exception.Message)" } }
+    }
+    # 2) complemento (lo carga Revit al abrir; si cambia hay que reiniciar Revit)
     $firma = "$VERSION_COMPLEMENTO|$($v.Version)"
     if (-not $forzar -and (Test-Path $dll) -and (Test-Path $man) -and (Test-Path $marca) -and ((Get-Content $marca -Raw).Trim() -eq $firma)) { continue }
-    New-Item -ItemType Directory -Force -Path $sub | Out-Null
-    $src = Join-Path $env:TEMP 'CortesNube_src.cs'; [IO.File]::WriteAllText($src, $FUENTE_COMPLEMENTO)
-    $tmpDll = Join-Path $env:TEMP "CortesNube_$($v.Anio).dll"; $ok = $false; $salida = ''
-    if ($v.Anio -le 2024) {
-      # Revit 2023 / 2024: .NET Framework 4.8
-      Remove-Item $tmpDll -Force -ErrorAction SilentlyContinue
-      $a = @('/nologo', '/target:library', '/optimize+', "/out:`"$tmpDll`"", "/r:`"$api`"", "/r:`"$apiui`"", "`"$src`"")
-      $salida = & $csc @a 2>&1 | Out-String
-      $ok = Test-Path $tmpDll
-    } else {
-      foreach ($core in $cores) {
-        Remove-Item $tmpDll -Force -ErrorAction SilentlyContinue
-        $refs = @('System.Private.CoreLib.dll', 'System.Runtime.dll', 'System.Collections.dll', 'System.Runtime.Extensions.dll', 'netstandard.dll', 'mscorlib.dll', 'System.Text.Encoding.Extensions.dll') | ForEach-Object { Join-Path $core.FullName $_ } | Where-Object { Test-Path $_ }
-        $a = @('/nologo', '/nostdlib+', '/noconfig', '/target:library', '/optimize+', "/out:`"$tmpDll`"") + ($refs | ForEach-Object { "/r:`"$_`"" }) + "/r:`"$api`"", "/r:`"$apiui`"", "`"$src`""
-        $salida = & $csc @a 2>&1 | Out-String
-        if (Test-Path $tmpDll) { $ok = $true; break }
-      }
-    }
-    if (-not $ok) { $errores += "Revit $($v.Anio): no se pudo compilar el complemento.`n$salida"; continue }
+    $tmpDll = Join-Path $env:TEMP "CortesNube_$($v.Anio).dll"
+    $err = CompilarRevit $v $FUENTE_COMPLEMENTO $tmpDll $true
+    if ($err) { $errores += "Revit $($v.Anio): no se pudo compilar el complemento.`n$err"; continue }
     try { Copy-Item $tmpDll $dll -Force } catch { $errores += "Revit $($v.Anio): esta abierto. Cierralo y vuelve a abrir este programa para actualizar el complemento."; continue }
     $xml = '<?xml version="1.0" encoding="utf-8"?>' + "`r`n<RevitAddIns>`r`n  <AddIn Type=`"Application`">`r`n    <Name>Cortes nube</Name>`r`n    <Assembly>$dll</Assembly>`r`n    <AddInId>6F1B2C3D-4E5F-4A7B-8C9D-0E1F2A3B4C5D</AddInId>`r`n    <FullClassName>CortesNube.App</FullClassName>`r`n    <VendorId>QHCN</VendorId>`r`n    <VendorDescription>Quinta Heeren - cortes de nube</VendorDescription>`r`n  </AddIn>`r`n</RevitAddIns>`r`n"
     [IO.File]::WriteAllText($man, $xml, (New-Object System.Text.UTF8Encoding($false)))
@@ -1919,35 +2228,41 @@ function Combo($items, $sel, $x, $y, $w) {
   $c.SelectedItem = [string]$sel; if ($c.SelectedIndex -lt 0) { $c.SelectedIndex = 0 }
   $form.Controls.Add($c); $c
 }
-[void](Etiqueta '0.  (OPCIONAL) NUBE A REVIT:' 15 12 220 22 $true)
-$lblNube = Etiqueta '' 240 13 380 22 $false; $lblNube.ForeColor = [System.Drawing.Color]::DimGray
-$btnNube = Boton 'Cambiar nube...' 500 8 120 30; $btnNube.Visible = $false
-$btnLas = Boton 'Convertir .las/.laz a .rcp' 625 8 190 30
-$btnVinc = Boton 'Vincular en Revit' 820 8 155 30
-[void](Etiqueta '1.  EN REVIT:  por cada corte, DOS secciones sobre la misma linea' 15 52 700 22 $true)
-[void](Etiqueta ('     - una CORTA (p. ej. 10 cm de profundidad, la nube en rojo) = la LINEA DE CORTE' + "`n" +
-                '     - otra LARGA (hasta el fondo) = la vista CON FONDO.     Las secciones llegan solas a esta ventana.') 15 78 960 42 $false)
-$btnAyuda = Boton 'Como hago un corte?' 785 46 190 30
-[void](Etiqueta '2.  CORTES DETECTADOS EN REVIT  (en vivo; doble clic en un corte para cambiarle el nombre)' 15 126 960 22 $true)
-$lblRevit = Etiqueta 'Buscando Revit...' 15 150 960 22 $false
-$lblRevit.ForeColor = [System.Drawing.Color]::DarkSlateBlue
+$lblRevit = Etiqueta 'Buscando Revit...' 15 12 760 26 $true
+$lblRevit.Font = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold); $lblRevit.ForeColor = [System.Drawing.Color]::DarkSlateBlue
+$btnAyuda = Boton 'Como hago un corte?' 785 10 190 30
+$lblGuia = Etiqueta 'En Revit haz, por cada corte, DOS secciones sobre la misma linea: una corta (unos 10 cm = linea de corte) y otra hasta el fondo. Aparecen aqui solas.' 15 42 960 22 $false
+$lblGuia.ForeColor = [System.Drawing.Color]::DimGray
 $lista = New-Object System.Windows.Forms.ListView
-$lista.Location = New-Object System.Drawing.Point(15, 176); $lista.Size = New-Object System.Drawing.Size(960, 205)
+$lista.Location = New-Object System.Drawing.Point(15, 68); $lista.Size = New-Object System.Drawing.Size(960, 300)
 $lista.View = 'Details'; $lista.CheckBoxes = $true; $lista.FullRowSelect = $true; $lista.GridLines = $true
 [void]$lista.Columns.Add('Nombre del corte', 170); [void]$lista.Columns.Add('Secciones de Revit', 230); [void]$lista.Columns.Add('Largo (m)', 80)
 [void]$lista.Columns.Add('Linea de corte (m)', 120); [void]$lista.Columns.Add('Fondo (m)', 85); [void]$lista.Columns.Add('Estado', 250)
 $form.Controls.Add($lista)
-[void](Etiqueta '3.  CALIDAD TIFF:' 15 392 140 22 $true)
-$cmbPpp = Combo @('300', '600', '1200') $PPP 160 389 70
-[void](Etiqueta 'ppp  a escala  1 :' 238 392 120 22 $false)
-$cmbEsc = Combo @('20', '25', '50', '75', '100', '200') $ESCALA 360 389 70
-$lblPix = Etiqueta '' 440 392 300 22 $false; $lblPix.ForeColor = [System.Drawing.Color]::DimGray
-$btnReinst = Boton 'Reinstalar complemento de Revit' 735 386 240 28
-$btnGen = Boton 'GENERAR CORTES' 15 422 960 52
+[void](Etiqueta 'Calidad:' 15 381 62 22 $true)
+$cmbPpp = Combo @('300', '600', '1200') $PPP 80 378 70
+[void](Etiqueta 'ppp  a escala  1 :' 158 381 120 22 $false)
+$cmbEsc = Combo @('20', '25', '50', '75', '100', '200') $ESCALA 280 378 70
+$lblPix = Etiqueta '' 360 381 300 22 $false; $lblPix.ForeColor = [System.Drawing.Color]::DimGray
+$btnHerr = Boton 'Herramientas...' 785 375 190 30
+# herramientas poco usadas: en un menu (los botones quedan ocultos y el menu los dispara)
+$btnLas = Boton 'Convertir .las/.laz a .rcp' 0 0 10 10; $btnVinc = Boton 'Vincular nube en Revit' 0 0 10 10
+$btnReinst = Boton 'Reinstalar complemento de Revit' 0 0 10 10; $btnNube = Boton 'Cambiar nube...' 0 0 10 10
+foreach ($b in $btnLas, $btnVinc, $btnReinst, $btnNube) { $b.Visible = $false }
+$menuHerr = New-Object System.Windows.Forms.ContextMenuStrip
+$menuHerr.Font = $fuente
+function Disparar($b) { $b.GetType().GetMethod('OnClick', [Reflection.BindingFlags]'NonPublic, Instance').Invoke($b, @([EventArgs]::Empty)) | Out-Null }
+foreach ($par in @(@('Convertir nube .las / .laz a .rcp (para Revit)', $btnLas), @('Vincular una nube .rcp / .rcs en Revit', $btnVinc), @('Reinstalar el complemento de Revit', $btnReinst))) {
+  $mi = New-Object System.Windows.Forms.ToolStripMenuItem($par[0]); $mi.Tag = $par[1]
+  $mi.Add_Click({ param($s, $e) Disparar $s.Tag })
+  [void]$menuHerr.Items.Add($mi)
+}
+$btnHerr.Add_Click({ $menuHerr.Show($btnHerr, (New-Object System.Drawing.Point(0, $btnHerr.Height))) })
+$btnGen = Boton 'GENERAR CORTES' 15 414 960 56
 $btnGen.Font = New-Object System.Drawing.Font('Segoe UI', 14, [System.Drawing.FontStyle]::Bold)
 $btnGen.BackColor = [System.Drawing.Color]::FromArgb(46, 139, 87); $btnGen.ForeColor = [System.Drawing.Color]::White; $btnGen.FlatStyle = 'Flat'
 $barra = New-Object System.Windows.Forms.ProgressBar
-$barra.Location = New-Object System.Drawing.Point(15, 484); $barra.Size = New-Object System.Drawing.Size(960, 22)
+$barra.Location = New-Object System.Drawing.Point(15, 480); $barra.Size = New-Object System.Drawing.Size(960, 22)
 $form.Controls.Add($barra)
 $lblPaso = Etiqueta 'Listo para empezar.' 15 510 960 22 $true
 $log = New-Object System.Windows.Forms.TextBox
@@ -1958,7 +2273,7 @@ $btnTif = Boton 'Abrir carpeta TIFF' 15 728 220 36
 $btnDwg = Boton 'Abrir carpeta CORTES DWG' 245 728 220 36
 $btnSalir = Boton 'Cerrar' 855 728 120 36
 foreach ($c in $lista, $btnGen, $barra, $lblPaso, $lblRevit) { $c.Anchor = 'Top, Left, Right' }
-foreach ($c in $btnAyuda, $btnReinst, $btnLas, $btnVinc, $btnNube) { $c.Anchor = 'Top, Right' }; $log.Anchor = 'Top, Bottom, Left, Right'
+foreach ($c in $btnAyuda, $btnHerr) { $c.Anchor = 'Top, Right' }; $lblGuia.Anchor = 'Top, Left, Right'; $log.Anchor = 'Top, Bottom, Left, Right'
 foreach ($c in $btnTif, $btnDwg) { $c.Anchor = 'Bottom, Left' }; $btnSalir.Anchor = 'Bottom, Right'
 function PixelElegido { 0.0254 / [double]$cmbPpp.SelectedItem * [double]$cmbEsc.SelectedItem }
 function MostrarPixel { $lblPix.Text = ('= pixel de {0:N1} mm en la realidad' -f ((PixelElegido) * 1000)) }
@@ -2035,12 +2350,31 @@ function PedirNombre($p, [string]$actual) {
 }
 
 $script:pares = @(); $script:revitFecha = [DateTime]::MinValue; $script:trabajando = $false; $script:cargando = $false
+# Revit abiertos ahora: @(@{Anio; Pid}) segun la carpeta de Revit.exe de cada proceso
+function RevitAbiertos {
+  @(Get-Process -Name Revit -ErrorAction SilentlyContinue | ForEach-Object {
+    $a = 0; try { if ($_.Path -match 'Revit (\d{4})') { $a = [int]$Matches[1] } } catch {}
+    if (-not $a) { try { $a = 2000 + [int]($_.MainModule.FileVersionInfo.FileMajorVersion) } catch {} }
+    [pscustomobject]@{ Anio = $a; Id = $_.Id }
+  })
+}
 function CargarRevit {
   $marcados = @{}; foreach ($it in $lista.Items) { $marcados[$it.Tag.Clave] = $it.Checked }
   $lista.Items.Clear(); $script:pares = @()
-  if (-not (Test-Path -LiteralPath $RevitTxt)) {
-    $lblRevit.Text = 'Esperando a Revit...  (abre tu proyecto en Revit: el complemento "Cortes nube" envia las secciones solo)'
-    $lblPaso.Text = 'Sin secciones de Revit todavia.'; return
+  $script:revitFecha = if (Test-Path -LiteralPath $RevitTxt) { (Get-Item -LiteralPath $RevitTxt).LastWriteTime } else { [DateTime]::MinValue }
+  $abiertos = @(RevitAbiertos); $script:revitAbierto = $abiertos.Count -gt 0
+  $txtRevit = if ($abiertos.Count) { (($abiertos | ForEach-Object { "Revit $($_.Anio)" } | Select-Object -Unique) -join ' + ') + ' abierto' } else { '' }
+  if (-not $abiertos.Count) {
+    $lblRevit.Text = 'Revit no esta abierto: abre Revit con tu proyecto (las secciones apareceran solas).'; $lblRevit.ForeColor = [System.Drawing.Color]::Firebrick
+    $lblPaso.Text = 'Esperando a Revit...'; return
+  }
+  $viejo = @($abiertos | Where-Object { $_.Anio -and $_.Anio -lt $REVIT_MINIMO })
+  if ($viejo.Count -eq $abiertos.Count) {
+    $lblRevit.Text = "$txtRevit : esta version no sirve (hace falta Revit $REVIT_MINIMO a 2026)."; $lblRevit.ForeColor = [System.Drawing.Color]::Firebrick; return
+  }
+  if (-not (Test-Path -LiteralPath $RevitTxt) -or ((Get-Item -LiteralPath $RevitTxt).LastWriteTime -lt ((Get-Process -Id $abiertos[0].Id -ErrorAction SilentlyContinue).StartTime))) {
+    $lblRevit.Text = "$txtRevit  -  esperando el proyecto... (si acabas de instalar el complemento, cierra y vuelve a abrir Revit)"; $lblRevit.ForeColor = [System.Drawing.Color]::DarkOrange
+    $lblPaso.Text = 'Abre tu proyecto en Revit: las secciones llegan solas.'; return
   }
   $script:revitFecha = (Get-Item -LiteralPath $RevitTxt).LastWriteTime
   $cab = @([IO.File]::ReadAllLines($RevitTxt) | Where-Object { $_ -like '#*' })
@@ -2052,7 +2386,7 @@ function CargarRevit {
     $script:pares = @([CNSec]::Agrupar($secs, $ROJO_MAX, $ROJO_AUTO, 0.05))
   }
   catch { $lblRevit.Text = "No se pudieron leer las secciones: $($_.Exception.Message)"; return }
-  $lblRevit.Text = ("Proyecto Revit: {0}   |   nube vinculada: {1}   |   {2} seccion(es) = {3} corte(s)   |   actualizado {4:HH:mm:ss}" -f $proy, $nube, $secs.Count, $script:pares.Count, $script:revitFecha)
+  $lblRevit.Text = ("{0}  -  proyecto: {1}  -  nube: {2}  -  {3} corte(s)" -f $txtRevit, $proy, $nube, $script:pares.Count)
   if ($nube -eq 'SIN NUBE VINCULADA') { $lblRevit.ForeColor = [System.Drawing.Color]::Firebrick } else { $lblRevit.ForeColor = [System.Drawing.Color]::DarkSlateBlue }
   $nom = LeerNombres
   foreach ($p in $script:pares) {
@@ -2121,27 +2455,28 @@ function PedirNombres($items) {
   return $script:nombresOk
 }
 
-# Pide a Revit (complemento 'Cortes nube') que exporte las secciones como BMP. Devuelve un resultado por pedido, en orden.
-function PedirRevit($pedidos) {
+# Pide al complemento 'Cortes nube' (dentro de Revit) que rasterice los puntos de la nube de cada seccion.
+# $lineas: una por imagen. Devuelve un resultado por linea, en orden.
+function PedirRevit([string[]]$lineas) {
   $carp = Split-Path $RevitTxt -Parent; New-Item -ItemType Directory -Force -Path $carp | Out-Null
-  $ped = Join-Path $carp 'exportar_imagenes.txt'; $listo = Join-Path $carp 'exportar_listo.txt'
+  $ped = Join-Path $carp 'exportar_nube.txt'; $listo = Join-Path $carp 'nube_listo.txt'
   Remove-Item -LiteralPath $listo -Force -ErrorAction SilentlyContinue
-  $lin = @($pedidos | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.Id, $_.Ruta, $_.Ancho, $_.Fr, ([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:0.####}', $_.Lejano)) })
-  [IO.File]::WriteAllLines("$ped.tmp", $lin); Move-Item -LiteralPath "$ped.tmp" -Destination $ped -Force
+  [IO.File]::WriteAllLines("$ped.tmp", $lineas); Move-Item -LiteralPath "$ped.tmp" -Destination $ped -Force
   $t0 = Get-Date
   while (Test-Path -LiteralPath $ped) {
     [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 200
     if (((Get-Date) - $t0).TotalSeconds -gt 25) {
       Remove-Item -LiteralPath $ped -Force -ErrorAction SilentlyContinue
-      throw "Revit no respondio. Deja abierto Revit con el proyecto de las secciones (con el complemento 'Cortes nube' cargado) y vuelve a pulsar GENERAR."
+      throw "Revit no respondio. Deja abierto Revit con tu proyecto (complemento 'Cortes nube' cargado) y vuelve a pulsar GENERAR."
     }
   }
   while (-not (Test-Path -LiteralPath $listo)) {
     [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 300
-    if (((Get-Date) - $t0).TotalMinutes -gt 20) { throw 'Revit tardo demasiado en exportar las imagenes.' }
+    $s = [int]((Get-Date) - $t0).TotalSeconds; $lblPaso.Text = ("Revit esta leyendo la nube de las secciones ... {0}:{1:00}  (no uses Revit mientras tanto)" -f [int][math]::Floor($s / 60), ($s % 60))
+    if (((Get-Date) - $t0).TotalMinutes -gt 30) { throw 'Revit tardo demasiado en leer la nube.' }
   }
   Start-Sleep -Milliseconds 300
-  $r = @(Get-Content -LiteralPath $listo | Where-Object { $_.Trim() } | ForEach-Object { $q = $_.Split('|', 3); [pscustomobject]@{ Id = $q[0]; Ok = ($q[1] -eq 'OK'); Txt = $q[2] } })
+  $r = @(Get-Content -LiteralPath $listo | Where-Object { $_.Trim() } | ForEach-Object { $q = $_.Split('|', 3); [pscustomobject]@{ Ruta = $q[0]; Ok = ($q[1] -eq 'OK'); Txt = $q[2] } })
   Remove-Item -LiteralPath $listo -Force -ErrorAction SilentlyContinue
   return ,$r
 }
@@ -2151,7 +2486,6 @@ function Generar {
   if ($sel.Count -eq 0) { [System.Windows.Forms.MessageBox]::Show('Marca al menos un corte en la lista.', 'Generador de cortes') | Out-Null; return }
   if (-not $AUTOCAD) { throw 'No encuentro AutoCAD instalado.' }
   foreach ($d in $TifDir, $DwgDir, $Tmp, $Png) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
-  # 1) nombres de todos los cortes marcados (una sola lista)
   $nombres = PedirNombres $sel
   if (-not $nombres) { Paso 'Cancelado.'; return }
   for ($i = 0; $i -lt $sel.Count; $i++) { GuardarNombre $sel[$i].Tag.Clave $nombres[$i]; $sel[$i].Text = $nombres[$i] }
@@ -2159,66 +2493,55 @@ function Generar {
   $pasoRojo = [math]::Min(0.001, $px)
   Log ("Calidad: {0} ppp a 1:{1}  ->  pixel {2:N2} mm" -f $ppp, $cmbEsc.SelectedItem, ($px * 1000))
   $sel = @($sel | Where-Object { $_.Checked })
-  if ($sel.Count -eq 0) { Paso 'No hay cortes con nombre para generar.'; return }
-  $total = $sel.Count * 2 + 2 + $sel.Count; $hecho = 0; $barra.Maximum = $total; $barra.Value = 0
-  # 2) Revit exporta las secciones tal como se ven (la corta y la de fondo) - una sola vez para todos
-  $pedidos = @()
+  $total = 3; $hecho = 0; $barra.Maximum = $total; $barra.Value = 0
+  # 1) Revit lee los puntos de la nube de cada seccion (corta y de fondo) y deja TIFF crudos - una sola vez para todos
+  $ped = @(); $lin = @()
   foreach ($it in $sel) {
     $p = $it.Tag; $k = $it.Text -replace '[^A-Za-z0-9_-]', '_'
-    $lej = if ($p.RojoAuto) { $p.Rojo.Fondo } else { 0 }
-    $pedidos += [pscustomobject]@{ It = $it; Tipo = 'rojo'; Corte = $p.Rojo; Id = [CNSec]::IdRevit($p.Rojo); Ruta = (Join-Path $Tmp "revit_$($k)_rojo"); Ancho = [int][math]::Max(200, [math]::Min(15000, [math]::Ceiling($p.Rojo.Largo / $pasoRojo))); Fr = [CNSec]::Fracciones($p.Rojo); Lejano = $lej }
+    $rr = Join-Path $Tmp "raw_$($k)_rojo.tif"
+    $ped += [pscustomobject]@{ It = $it; Tipo = 'rojo'; Ruta = $rr }; $lin += [CNSec]::PedidoNube($p.Rojo, $p.Rojo.Dx, $p.Rojo.Dy, $pasoRojo, 0.004, $rr)
     if ($p.Fondo) {
-      $pedidos += [pscustomobject]@{ It = $it; Tipo = 'fondo'; Corte = $p.Fondo; Id = [CNSec]::IdRevit($p.Fondo); Ruta = (Join-Path $Tmp "revit_$($k)_fondo"); Ancho = [int][math]::Max(200, [math]::Min(15000, [math]::Ceiling($p.Fondo.Largo / $px))); Fr = [CNSec]::Fracciones($p.Fondo); Lejano = 0 }
+      $rf = Join-Path $Tmp "raw_$($k)_fondo.tif"
+      $ped += [pscustomobject]@{ It = $it; Tipo = 'fondo'; Ruta = $rf }; $lin += [CNSec]::PedidoNube($p.Fondo, $p.Rojo.Dx, $p.Rojo.Dy, $px, ($RELLENO / 2), $rf)
     }
     $it.SubItems[5].Text = 'Esperando a Revit...'
   }
-  foreach ($q in $pedidos) { Remove-Item -LiteralPath "$($q.Ruta).bmp" -Force -ErrorAction SilentlyContinue }
-  Paso "Revit esta exportando $($pedidos.Count) vista(s) de seccion (no toques Revit mientras tanto)..."
-  try { $res = PedirRevit $pedidos }
+  foreach ($q in $ped) { Remove-Item -LiteralPath $q.Ruta -Force -ErrorAction SilentlyContinue }
+  Paso "Revit esta leyendo la nube de $($ped.Count) seccion(es)..."
+  try { $res = PedirRevit $lin }
   catch { foreach ($it in $sel) { $it.SubItems[5].Text = "ERROR: $($_.Exception.Message)" }; Log "ERROR: $($_.Exception.Message)"; Paso 'No se genero ningun corte. Revisa los mensajes.'; return }
-  for ($i = 0; $i -lt $pedidos.Count; $i++) {
-    $q = $pedidos[$i]; $r = if ($i -lt $res.Count) { $res[$i] } else { $null }
-    $q | Add-Member -NotePropertyName Bmp -NotePropertyValue $(if ($r -and $r.Ok -and (Test-Path -LiteralPath $r.Txt)) { $r.Txt } else { $null })
-    $q | Add-Member -NotePropertyName Err -NotePropertyValue $(if ($r -and -not $r.Ok) { $r.Txt } elseif (-not $r) { 'Revit no devolvio la imagen' } else { $null })
+  for ($i = 0; $i -lt $ped.Count; $i++) {
+    $q = $ped[$i]; $r = $res | Where-Object { $_.Ruta -eq $q.Ruta } | Select-Object -First 1
+    $ok = $r -and $r.Ok -and (Test-Path -LiteralPath $q.Ruta)
+    $q | Add-Member -NotePropertyName Ok -NotePropertyValue $ok
+    $q | Add-Member -NotePropertyName Txt -NotePropertyValue $(if ($r) { $r.Txt } else { 'Revit no devolvio la imagen' })
+    Log "   $($q.It.Text) ($($q.Tipo)): $($q.Txt)"
   }
   $barra.Value = ++$hecho
   $listos = @()
   foreach ($it in $sel) {
-    $p = $it.Tag; $n = $it.Text; $k = $n -replace '[^A-Za-z0-9_-]', '_'
+    $p = $it.Tag; $n = $it.Text
     $it.SubItems[5].Text = 'Trabajando...'; $t0 = Get-Date
-    $qr = $pedidos | Where-Object { $_.It -eq $it -and $_.Tipo -eq 'rojo' } | Select-Object -First 1
-    $qf = $pedidos | Where-Object { $_.It -eq $it -and $_.Tipo -eq 'fondo' } | Select-Object -First 1
+    $qr = $ped | Where-Object { $_.It -eq $it -and $_.Tipo -eq 'rojo' } | Select-Object -First 1
+    $qf = $ped | Where-Object { $_.It -eq $it -and $_.Tipo -eq 'fondo' } | Select-Object -First 1
     try {
       Get-ChildItem -LiteralPath $TifDir -Filter "Corte_$($n)_*.tif" -ErrorAction SilentlyContinue | Remove-Item -Force
-      if (-not $qr.Bmp) { throw "Revit no exporto la seccion de corte: $($qr.Err)" }
-      Paso "Corte $n  (1/2): leyendo las imagenes de Revit..."
-      $rawR = Join-Path $Tmp "raw_$($k)_rojo.tif"
-      EsperarHilo ([CNBg]::DesdeBmp($qr.Bmp, $rawR, $qr.Corte, $p.Rojo.Dx, $p.Rojo.Dy))
-      if (-not [CNBg]::Info) { throw 'la seccion de corte salio vacia en Revit (revisa que se vea la nube en esa seccion)' }
-      Log "   seccion de corte desde Revit: $([CNBg]::Info)"
-      $rawF = $null
-      if ($qf) {
-        if ($qf.Bmp) {
-          $rawF = Join-Path $Tmp "raw_$($k)_fondo.tif"
-          EsperarHilo ([CNBg]::DesdeBmp($qf.Bmp, $rawF, $qf.Corte, $p.Rojo.Dx, $p.Rojo.Dy))
-          if ([CNBg]::Info) { Log "   vista con fondo desde Revit: $([CNBg]::Info)" } else { $rawF = $null; Log '   la vista con fondo salio vacia: solo se hara la seccion' }
-        } else { Log "   la vista con fondo no se exporto ($($qf.Err)): solo se hara la seccion" }
-      }
-      $barra.Value = ++$hecho
-      Paso "Corte $n  (2/2): uniendo la linea de corte con el fondo..."
+      if (-not $qr.Ok) { throw "no se pudo leer la seccion de corte: $($qr.Txt)" }
+      $rawF = if ($qf -and $qf.Ok) { $qf.Ruta } else { $null }
+      if ($qf -and -not $qf.Ok) { Log "   la vista con fondo fallo ($($qf.Txt)): solo se hara la seccion" }
+      Paso "Corte $n : uniendo la linea de corte con el fondo..."
       $tc = if ($rawF) { Join-Path $TifDir "Corte_$($n)_revit_conjunto.tif" } else { $null }
       $tr = Join-Path $TifDir "Corte_$($n)_revit_rojo.tif"
-      EsperarHilo ([CNBg]::Componer($rawF, $rawR, $tc, $tr, $px, $ppp))
+      EsperarHilo ([CNBg]::Componer($rawF, $qr.Ruta, $tc, $tr, $px, $ppp))
       Log "   imagenes de $([CNBg]::Info) pixeles ($ppp ppp a 1:$($cmbEsc.SelectedItem))"
-      foreach ($f in @($rawR, $rawF, $qr.Bmp, $(if ($qf) { $qf.Bmp }))) { if ($f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } }
-      $barra.Value = ++$hecho
+      foreach ($f in @($qr.Ruta, $rawF)) { if ($f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } }
       $it.SubItems[5].Text = ('Imagenes listas ({0:N0} s)' -f ((Get-Date) - $t0).TotalSeconds)
       $listos += $it
     } catch {
       $it.SubItems[5].Text = "ERROR: $($_.Exception.Message)"; Log "Corte $n : ERROR $($_.Exception.Message)"
-      $hecho = [math]::Min($total, $hecho + 2); $barra.Value = $hecho
     }
   }
+  $barra.Value = ++$hecho
   if ($listos.Count -eq 0) { Paso 'No se genero ningun corte. Revisa los mensajes.'; return }
   Paso 'Preparando las imagenes para AutoCAD...'
   $solo = (@($listos | ForEach-Object { $_.Text }) -join ',')
@@ -2277,7 +2600,7 @@ $btnReinst.Add_Click({
   if ($r.Errores.Count) { $m += "`n`n" + ($r.Errores -join "`n") }
   [System.Windows.Forms.MessageBox]::Show($m, 'Complemento de Revit') | Out-Null
 })
-function MostrarNube { $lblNube.Text = 'solo si tu nube aun no esta en Revit (los cortes salen de Revit)' }
+function MostrarNube { }
 function ElegirNube([string]$ruta) {
   $script:NUBE = $ruta; Set-Variable -Name NUBE -Value $ruta -Scope Global
   [IO.File]::WriteAllText($NubeTxt, $ruta); MostrarNube; Log "Nube para los cortes: $ruta"
@@ -2397,7 +2720,9 @@ $reloj.Add_Tick({
   $script:cargando = $true
   try {
     $f = if (Test-Path -LiteralPath $RevitTxt) { (Get-Item -LiteralPath $RevitTxt).LastWriteTime } else { [DateTime]::MinValue }
-    if ($f -ne $script:revitFecha) { CargarRevit; if ($f -ne [DateTime]::MinValue) { Log "Revit actualizo las secciones ($('{0:HH:mm:ss}' -f $f))" } }
+    $hay = @(Get-Process -Name Revit -ErrorAction SilentlyContinue).Count -gt 0
+    $antes = $script:revitFecha
+    if ($f -ne $antes -or $hay -ne $script:revitAbierto) { CargarRevit; if ($f -ne $antes -and $antes -ne [DateTime]::MinValue -and $f -ne [DateTime]::MinValue) { Log "Revit actualizo las secciones ($('{0:HH:mm:ss}' -f $f))" } }
   } catch { } finally { $script:cargando = $false }
 })
 $form.Add_Shown({
@@ -2413,7 +2738,7 @@ $form.Add_Shown({
       Log "Complemento 'Cortes nube' instalado en: $($r.Hechos -join ', ')"
       [System.Windows.Forms.MessageBox]::Show("Se instalo el complemento 'Cortes nube' en $($r.Hechos -join ', ').`n`nCierra Revit (guarda tu trabajo) y vuelve a abrirlo.`nSi Revit pregunta por el complemento, elige 'Cargar siempre'.`n`nDesde entonces tus secciones apareceran solas en esta ventana.", 'Complemento de Revit', 'OK', 'Information') | Out-Null
     }
-    foreach ($e in $r.Errores) { Log "AVISO complemento: $e" }
+    foreach ($e in $r.Errores) { if ($e -like '(info)*') { Log $e.Substring(7) } else { Log "AVISO complemento: $e" } }
   } catch { Log "AVISO complemento: $($_.Exception.Message)" }
   CargarRevit
   $reloj.Start()
