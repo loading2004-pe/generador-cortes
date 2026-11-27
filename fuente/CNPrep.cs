@@ -685,10 +685,25 @@ public static class CNPrep
         return r;
     }
 
+    // llamada LISP que pone una pieza: imagen vinculada (copia el PNG junto al DWG) u OLE incrustado
+    static string Pone(Tile t, string dwgDir, string L, string que, int n)
+    {
+        if (!Vinculada) return "cn:ole \"" + Lsp(t.File) + "\"";
+        string nombre = "Corte " + L + " - " + que + (n > 1 ? " " + Path.GetFileNameWithoutExtension(t.File).Substring(Path.GetFileNameWithoutExtension(t.File).LastIndexOf('_') + 1) : "") + ".png";
+        string dst = Path.Combine(dwgDir, nombre);
+        Directory.CreateDirectory(dwgDir);
+        File.Copy(t.File, dst, true);
+        return "cn:img \"" + Lsp(dst) + "\"";
+    }
+
     // Arma los guiones de AutoCAD (uno por letra). Devuelve las letras listas para armar.
+    // true: UNA imagen por fila, vinculada (PNG junto al DWG, calidad completa). false: pedazos OLE incrustados.
+    public static bool Vinculada = true;
+
     public static string[] Build(string root, string imgDir, string pngDir, double pxFranja, double pxFondo, int maxPx,
                                  double baja, double sep, string solo, string dwgDir)
     {
+        if (Vinculada) maxPx = 1000000;      // sin cortar en pedazos
         Directory.CreateDirectory(pngDir);
         string clip = Path.Combine(pngDir, "clip_emf.ps1");
         File.WriteAllText(clip, CLIP_PS1, Encoding.ASCII);
@@ -733,6 +748,8 @@ public static class CNPrep
             S.Add("(defun cn:capa (n c) (if (not (tblsearch \"LAYER\" n)) (command \"_.-LAYER\" \"_N\" n \"_C\" c n \"\")))");
             S.Add("(cn:capa \"" + capaArr + "\" \"7\") (cn:capa \"" + capaAba + "\" \"8\") (cn:capa \"CORTE_NIVEL\" \"1\") (cn:capa \"CORTE_TEXTO\" \"7\")");
             S.Add("(defun cn:ole (png x y w h l / e o mn mx k) (setq e (entlast) k 0) (while (and (< k 6) (equal e (entlast))) (if (> k 0) (command \"_.DELAY\" (* k 800))) (vlax-invoke sh (quote Run) (strcat \"powershell -NoProfile -STA -ExecutionPolicy Bypass -File \\\"\" \"" + Lsp(clip) + "\" \"\\\" \\\"\" png \"\\\"\") 0 :vlax-true) (command \"_.PASTECLIP\" (list x y 0.0)) (setq k (1+ k))) (if (not (equal e (entlast))) (progn (setq o (vlax-ename->vla-object (entlast))) (vla-put-Layer o l) (vl-catch-all-apply (quote vla-put-LockAspectRatio) (list o :vlax-false)) (vla-put-Width o w) (vla-put-Height o h) (vla-GetBoundingBox o (quote mn) (quote mx)) (setq mn (vlax-safearray->list mn)) (vla-Move o (vlax-3d-point mn) (vlax-3d-point (list x y 0.0))) o)))");
+            S.Add("(defun cn:img (png x y w h l / o) (setq o (vla-AddRaster ms png (vlax-3d-point (list x y 0.0)) 1.0 0.0)) (vla-put-Layer o l) (vla-put-ImageWidth o w) (vla-put-ImageHeight o h) (vla-put-Origin o (vlax-3d-point (list x y 0.0))) (setq cn:rs (cons (cons o (vl-filename-base png)) cn:rs)) o)");
+            S.Add("(setq cn:rs nil)");
             S.Add("(defun cn:mete (o q) (if o (set q (cons o (eval q)))) o)");
             S.Add("(defun cn:grupo (nom lst l / arr r) (if lst (progn (setvar \"PICKSTYLE\" 1) (setq r (vl-catch-all-apply (quote vla-Add) (list (vla-get-Groups doc) nom))) (if (not (vl-catch-all-error-p r)) (progn (setq arr (vlax-make-safearray vlax-vbObject (cons 0 (1- (length lst))))) (vlax-safearray-fill arr lst) (vl-catch-all-apply (quote vla-AppendItems) (list r arr)))))))");
             S.Add("(defun cn:txt (s x y h l / o) (setq o (vla-AddText ms s (vlax-3d-point (list x y 0.0)) h)) (vla-put-Layer o l) o)");
@@ -757,12 +774,12 @@ public static class CNPrep
                 }
                 foreach (Tile t in fr)
                 {
-                    S.Add("(cn:mete (cn:ole \"" + Lsp(t.File) + "\" " + F4(t.U + d) + " " + F4(t.Zbot) + " " + F4(t.W) + " " + F4(t.H) + " \"" + capaArr + "\") (quote cn:g1))");
+                    S.Add("(cn:mete (" + Pone(t, dwgDir, L, revit ? "con fondo" : "sin fondo", fr.Count) + " " + F4(t.U + d) + " " + F4(t.Zbot) + " " + F4(t.W) + " " + F4(t.H) + " \"" + capaArr + "\") (quote cn:g1))");
                     M.Add(string.Format("{0,-44} {1,-16} {2,10} {3,10} {4,9} {5,9}", Path.GetFileName(t.File), capaArr, F4(t.U + d), F4(t.Zbot), F4(t.W), F4(t.H)));
                 }
                 foreach (Tile t in fo)
                 {
-                    S.Add("(cn:mete (cn:ole \"" + Lsp(t.File) + "\" " + F4(t.U + d) + " " + F4(t.Zbot - bj) + " " + F4(t.W) + " " + F4(t.H) + " \"" + capaAba + "\") (quote cn:g2))");
+                    S.Add("(cn:mete (" + Pone(t, dwgDir, L, revit ? "linea de corte" : "con fondo", fo.Count) + " " + F4(t.U + d) + " " + F4(t.Zbot - bj) + " " + F4(t.W) + " " + F4(t.H) + " \"" + capaAba + "\") (quote cn:g2))");
                     M.Add(string.Format("{0,-44} {1,-16} {2,10} {3,10} {4,9} {5,9}", Path.GetFileName(t.File), capaAba, F4(t.U + d), F4(t.Zbot - bj), F4(t.W), F4(t.H)));
                 }
                 double xa = x0, xb = umax + d;
@@ -791,6 +808,8 @@ public static class CNPrep
             S.Add("(command \"_.ZOOM\" \"_E\")");
             S.Add("(setvar \"OSMODE\" cn:os)");
             S.Add("(vla-SaveAs doc \"" + Lsp(dwg) + "\")");
+            // imagenes vinculadas: ruta relativa (la carpeta del DWG), para que funcione aunque se mueva la carpeta
+            S.Add("(if cn:rs (progn (foreach r cn:rs (vl-catch-all-apply (quote vla-put-ImageFile) (list (car r) (strcat \".\\\\\" (cdr r) \".png\")))) (vla-Save doc)))");
             S.Add("(princ \"\\nCORTE " + L + ": listo.\") (princ)");
             S.Add("_.QUIT");
             S.Add("Y");

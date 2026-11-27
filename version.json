@@ -1,10 +1,10 @@
 {
- "version": "2026.11.27.1",
- "fecha": "2026-11-27 10:09",
- "notas": "Ya tengo los TIFF: los TIFF pasan tal cual (pixel por pixel). Si Revit achico alguna imagen al exportarla (no deja pasar de 15000 px, p. ej. plantas o cortes largos), la app lo detecta y pregunta si compensar su tamano en AutoCAD.",
+ "version": "2026.11.27.2",
+ "fecha": "2026-11-27 11:51",
+ "notas": "Cada corte es UNA sola imagen por fila (vinculada, calidad completa, escala exacta 1:1 en metros); los PNG quedan junto al DWG en CORTES DWG y deben ir siempre con el DWG.",
  "min_lanzador": 1,
  "archivos": {
-  "GENERADOR_DE_CORTES.bat": "92af0110932b57fb7299077d664595ce79d71e4ef500decad8126ebd65c7d794",
+  "GENERADOR_DE_CORTES.bat": "fabca3015ba7eef262bcb037be64869bd6baf3935a26a25d7fe389d55918bac3",
   "LEEME_CORTES_REVIT.txt": "a2579280918fb26c2ba1cbec383c67cb51e8f347b43c257a7dc9c4d7d47c6d60"
  }
 }
