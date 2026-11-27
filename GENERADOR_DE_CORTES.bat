@@ -2329,6 +2329,9 @@ foreach ($par in @(@('Convertir nube .las / .laz a .rcp (para Revit)', $btnLas),
   $mi.Add_Click({ param($s, $e) Disparar $s.Tag })
   [void]$menuHerr.Items.Add($mi)
 }
+$miAsis = New-Object System.Windows.Forms.ToolStripMenuItem('Pedir un cambio / reportar un error al asistente...')
+$miAsis.Add_Click({ PedirAsistente })
+[void]$menuHerr.Items.Add($miAsis)
 $btnHerr.Add_Click({ $menuHerr.Show($btnHerr, (New-Object System.Drawing.Point(0, $btnHerr.Height))) })
 $btnGen = Boton 'GENERAR CORTES  (desde Revit)' 15 414 690 56
 $btnTiff = Boton 'Ya tengo los TIFF: pasar a AutoCAD' 715 414 260 56
@@ -2353,9 +2356,33 @@ function PixelElegido { 0.0254 / [double]$cmbPpp.SelectedItem * [double]$cmbEsc.
 function MostrarPixel { $lblPix.Text = ('= pixel de {0:N1} mm en la realidad' -f ((PixelElegido) * 1000)) }
 
 # ============================== FUNCIONES ==============================
+# registro en disco (lo lee el asistente para encontrar errores): <programa>\asistente\registro.log
+$AsisDir = Join-Path $Root 'asistente'
+try { New-Item -ItemType Directory -Force -Path $AsisDir | Out-Null } catch {}
+$RegLog = Join-Path $AsisDir 'registro.log'
+try { if ((Test-Path -LiteralPath $RegLog) -and (Get-Item -LiteralPath $RegLog).Length -gt 2MB) { Move-Item -LiteralPath $RegLog -Destination ($RegLog + '.1') -Force } } catch {}
 function Log([string]$s) {
   $log.AppendText($s + "`r`n")
-  foreach ($l in [CNLog]::Sacar()) { if ($l.Trim()) { $log.AppendText('   ' + $l.Trim() + "`r`n") } }
+  $extra = @(foreach ($l in [CNLog]::Sacar()) { if ($l.Trim()) { '   ' + $l.Trim() } })
+  foreach ($l in $extra) { $log.AppendText($l + "`r`n") }
+  try { Add-Content -LiteralPath $RegLog -Value (@((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $s) + $extra) -Encoding UTF8 } catch {}
+}
+# pedir un cambio al asistente (lo revisa cada pocas horas, corrige, prueba y publica)
+function PedirAsistente {
+  $f = New-Object System.Windows.Forms.Form; $f.Text = 'Pedir un cambio al asistente'; $f.Size = New-Object System.Drawing.Size(620, 380)
+  $f.StartPosition = 'CenterParent'; $f.Font = $fuente; $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false
+  $l = New-Object System.Windows.Forms.Label; $l.Location = New-Object System.Drawing.Point(12, 10); $l.Size = New-Object System.Drawing.Size(580, 60)
+  $l.Text = "Escribe con tus palabras que quieres cambiar, agregar o que error viste. El asistente lo revisa cada pocas horas, corrige el programa y publica una actualizacion. Los mensajes de esta ventana se le envian solos."
+  $f.Controls.Add($l)
+  $t = New-Object System.Windows.Forms.TextBox; $t.Multiline = $true; $t.ScrollBars = 'Vertical'; $t.Location = New-Object System.Drawing.Point(12, 75); $t.Size = New-Object System.Drawing.Size(580, 200); $f.Controls.Add($t)
+  $u = New-Object System.Windows.Forms.CheckBox; $u.Text = 'Urgente (me impide trabajar)'; $u.Location = New-Object System.Drawing.Point(12, 290); $u.AutoSize = $true; $f.Controls.Add($u)
+  $ok = New-Object System.Windows.Forms.Button; $ok.Text = 'Enviar'; $ok.Location = New-Object System.Drawing.Point(392, 290); $ok.Size = New-Object System.Drawing.Size(95, 32); $ok.DialogResult = 'OK'; $f.Controls.Add($ok)
+  $ca = New-Object System.Windows.Forms.Button; $ca.Text = 'Cancelar'; $ca.Location = New-Object System.Drawing.Point(497, 290); $ca.Size = New-Object System.Drawing.Size(95, 32); $ca.DialogResult = 'Cancel'; $f.Controls.Add($ca)
+  if ($f.ShowDialog($form) -ne 'OK' -or -not $t.Text.Trim()) { return }
+  $item = [ordered]@{ id = (Get-Date -Format 'yyyyMMdd-HHmmss'); fecha = (Get-Date -Format 'yyyy-MM-dd HH:mm'); app = 'Generador de cortes'; version = $env:CN_VERSION; urgente = [bool]$u.Checked; pedido = $t.Text.Trim(); estado = 'pendiente' }
+  Add-Content -LiteralPath (Join-Path $AsisDir 'pedidos.jsonl') -Value (ConvertTo-Json $item -Compress) -Encoding UTF8
+  Log "Pedido enviado al asistente: $($t.Text.Trim())"
+  [System.Windows.Forms.MessageBox]::Show("Pedido enviado. Las respuestas del asistente quedan en:`n$(Join-Path $AsisDir 'respuestas.jsonl')`n(y se muestran al abrir el programa).", 'Asistente', 'OK', 'Information') | Out-Null
 }
 function Paso([string]$s) { $lblPaso.Text = $s; Log $s; [System.Windows.Forms.Application]::DoEvents() }
 function Ocupado([int]$ms) { $t = [DateTime]::Now.AddMilliseconds($ms); while ([DateTime]::Now -lt $t) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 } }
@@ -3004,6 +3031,15 @@ $form.Add_Shown({
   MostrarNube; MostrarPixel
   foreach ($d in $TifDir, $DwgDir) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
   if ($env:CN_UPDATE_MSG) { Log "Actualizaciones: $env:CN_UPDATE_MSG" }
+  try {
+    $rf = Join-Path $AsisDir 'respuestas.jsonl'; $vf = Join-Path $AsisDir 'respuestas_vistas.txt'
+    if (Test-Path -LiteralPath $rf) {
+      $vistas = 0; if (Test-Path -LiteralPath $vf) { $vistas = [int](Get-Content -LiteralPath $vf -Raw) }
+      $rs = @(Get-Content -LiteralPath $rf -Encoding UTF8 | Where-Object { $_.Trim() })
+      for ($i = $vistas; $i -lt $rs.Count; $i++) { $r = $rs[$i] | ConvertFrom-Json; Log "Asistente ($($r.fecha)): $($r.estado) - $($r.respuesta)" }
+      Set-Content -LiteralPath $vf -Value $rs.Count
+    }
+  } catch {}
   Log "Carpetas de salida (junto al programa):  TIFF -> $TifDir   |   CORTES DWG -> $DwgDir"
   Log ("Revit en esta PC: " + (($script:revits | ForEach-Object { if ($_.Anio -ge $REVIT_MINIMO) { "Revit $($_.Anio) (ok)" } else { "Revit $($_.Anio) (muy antiguo, se ignora)" } }) -join ', '))
   [System.Windows.Forms.Application]::DoEvents()
