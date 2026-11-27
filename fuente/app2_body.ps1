@@ -1170,8 +1170,69 @@ function PedirEscala([int]$cuantos, [double]$pppTag) {
   return @{ Ppp = [double]$c1.SelectedItem; Esc = [double]$c2.SelectedItem }
 }
 
+# Revit achica EN SILENCIO las imagenes que pasarian de ~15000 px (o se exportan con otro tamano, p. ej. la planta):
+# se detecta comparando el alto de las letras del titulo de la vista (en papel siempre mide lo mismo) y, en una
+# pareja CCL + LC, el ancho de la linea roja. A cada TIFF afectado se le da su propio tamano de pixel.
+function CorregirRecortesRevit([string]$dir, [string[]]$nombres) {
+  $px0 = [CNPrep]::PxSinGeo
+  if ($px0 -le 0) { return }
+  Paso 'Revisando si Revit achico alguna imagen...'
+  $info = @{}
+  foreach ($n in $nombres) {
+    foreach ($k in 'conjunto', 'rojo') {
+      $f = Join-Path $dir "Corte_$($n)_revit_$k.tif"
+      if (Test-Path -LiteralPath $f) { $info["$n|$k"] = @{ F = $f; W = [CNPrep]::AnchoPx($f); T = -1.0; R = -1 } }
+    }
+  }
+  $LIM = 14990
+  # titulo de referencia: imagenes no recortadas que tienen titulo (con 3 basta)
+  $refs = @()
+  foreach ($kv in ($info.GetEnumerator() | Sort-Object Name)) {
+    if ($refs.Count -ge 3) { break }
+    $i = $kv.Value
+    if ($i.W -lt $LIM -and $kv.Name -like '*|conjunto') { $i.T = [CNPrep]::AltoTitulo($i.F); if ($i.T -gt 0) { $refs += $i.T } }
+  }
+  if (-not $refs.Count) { Log '   (no hay titulo de Revit para comparar: se usa el mismo pixel para todas)'; return }
+  $Tref = ($refs | Sort-Object)[[int][math]::Floor(($refs.Count - 1) / 2)]
+  $cambios = @()
+  foreach ($kv in $info.GetEnumerator()) {
+    $n, $k = $kv.Name.Split('|'); $i = $kv.Value
+    $otro = $info["$n|$(if ($k -eq 'rojo') { 'conjunto' } else { 'rojo' })"]
+    $f = 1.0; $como = ''
+    if ($i.W -ge $LIM -and $otro -and $otro.W -lt $LIM) {
+      # recortada por Revit y su pareja no: la linea roja da la proporcion exacta
+      if ($i.R -lt 0) { $i.R = [CNPrep]::AnchoRojo($i.F) }; if ($otro.R -lt 0) { $otro.R = [CNPrep]::AnchoRojo($otro.F) }
+      if ($i.R -gt 100 -and $otro.R -gt 100) { $f = $i.R / $otro.R; $como = 'linea roja vs su pareja' }
+    }
+    if (-not $como -and $k -eq 'conjunto' -and ($i.W -ge $LIM -or -not $otro)) {
+      if ($i.T -lt 0) { $i.T = [CNPrep]::AltoTitulo($i.F) }
+      if ($i.T -gt 0) { $f = $i.T / $Tref; $como = 'tamano del titulo' }
+    }
+    if ($como -and [math]::Abs($f - 1) -gt 0.006 -and $f -gt 0.05) {
+      $cambios += @{ F = $i.F; N = $n; K = $k; Fac = $f; Como = $como }
+    }
+  }
+  if (-not $cambios.Count) { Log '   Ninguna: todas pasan tal cual.'; return }
+  $txt = ($cambios | ForEach-Object { "   Corte {0} ({1}): Revit la exporto al {2:N1} %" -f $_.N, $(if ($_.K -eq 'rojo') { 'linea de corte' } else { 'con fondo' }), ($_.Fac * 100) }) -join "`n"
+  $r = [System.Windows.Forms.MessageBox]::Show(
+    "Revit achico estas imagenes al exportarlas (no deja pasar de 15000 px de ancho):`n`n$txt`n`n" +
+    "Las imagenes NO se modifican en ningun caso (pasan pixel por pixel).`n`n" +
+    "SI = compensar: esas imagenes ocupan en AutoCAD su tamano real (recomendado).`n" +
+    "NO = pasar todo tal cual (esas quedaran mas chicas que el resto).",
+    'Imagenes achicadas por Revit', 'YesNo', 'Question')
+  foreach ($c in $cambios) {
+    if ($r -eq 'Yes') {
+      [CNPrep]::PxArchivo($c.F, $px0 / $c.Fac)
+      Log ("   Corte {0} ({1}): compensado, pixel {2:N2} mm ({3})" -f $c.N, $(if ($c.K -eq 'rojo') { 'linea de corte' } else { 'con fondo' }), ($px0 / $c.Fac * 1000), $c.Como)
+    } else {
+      Log ("   Corte {0}: se pasa tal cual (Revit la achico al {1:N1} %)" -f $c.N, ($c.Fac * 100))
+    }
+  }
+}
+
 function TiffACad {
   if (-not $AUTOCAD) { throw 'No encuentro AutoCAD instalado.' }
+  [CNPrep]::PxPorArchivo.Clear()
   $d = New-Object System.Windows.Forms.OpenFileDialog
   $d.Title = 'Elige los TIFF de tus cortes (puedes elegir varios)'; $d.Filter = 'Imagenes TIFF (*.tif;*.tiff)|*.tif;*.tiff'; $d.Multiselect = $true
   $memo = Join-Path $Tmp 'ultima_carpeta_tif.txt'
@@ -1214,6 +1275,7 @@ function TiffACad {
     if ($nombres -notcontains $n) { $nombres += $n }
   }
   if (-not $nombres.Count) { return }
+  if ($sinMedida.Count) { CorregirRecortesRevit $dir $nombres }
   $abiertos = @($nombres | Where-Object { DwgAbierto $_ } | ForEach-Object { "Corte $_.dwg" })
   if ($abiertos.Count) { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue; [System.Windows.Forms.MessageBox]::Show("Estos DWG estan abiertos en AutoCAD:`n`n   $($abiertos -join "`n   ")`n`nCierralos (guarda si los cambiaste) y vuelve a intentarlo.", 'Generador de cortes', 'OK', 'Warning') | Out-Null; return }
   $script:trabajando = $true

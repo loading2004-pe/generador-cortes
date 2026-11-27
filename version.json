@@ -1,10 +1,10 @@
 {
- "version": "2026.11.26.4",
- "fecha": "2026-11-26 20:36",
- "notas": "Nuevo: Herramientas > «Pedir un cambio / reportar un error al asistente»: el asistente revisa los pedidos y errores cada pocas horas, corrige y publica. Sus respuestas aparecen al abrir el programa.",
+ "version": "2026.11.27.1",
+ "fecha": "2026-11-27 10:09",
+ "notas": "Ya tengo los TIFF: los TIFF pasan tal cual (pixel por pixel). Si Revit achico alguna imagen al exportarla (no deja pasar de 15000 px, p. ej. plantas o cortes largos), la app lo detecta y pregunta si compensar su tamano en AutoCAD.",
  "min_lanzador": 1,
  "archivos": {
-  "GENERADOR_DE_CORTES.bat": "6ca88f31b08989427dc6b5b5be9ebf57964140b93698590456027ab80b60b066",
+  "GENERADOR_DE_CORTES.bat": "92af0110932b57fb7299077d664595ce79d71e4ef500decad8126ebd65c7d794",
   "LEEME_CORTES_REVIT.txt": "a2579280918fb26c2ba1cbec383c67cb51e8f347b43c257a7dc9c4d7d47c6d60"
  }
 }

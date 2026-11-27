@@ -28,6 +28,83 @@ public static class CNPrep
     public static double Escala = 50, PxSinGeo = 0;
     // como sabe la medida del ultimo TIFF leido: 0 = georreferenciado, 1 = por sus ppp (+ escala), 2 = sin datos (pixel elegido)
     public static int UltimaMedida = 0; public static double UltimosPpp = 0;
+    // pixel propio de cada TIFF sin georreferencia (Revit achica en silencio las imagenes de mas de 15000 px)
+    public static Dictionary<string, double> PxPorArchivo = new Dictionary<string, double>();
+    public static void PxArchivo(string path, double px) { PxPorArchivo[System.IO.Path.GetFullPath(path).ToLowerInvariant()] = px; }
+
+    // Alto (px) de las letras del titulo de la vista de Revit (esquina inferior izquierda: "1  CORTE 5 / 1 : 100").
+    // En papel siempre mide lo mismo: si una imagen lo tiene mas chico, Revit la achico. 0 = no hay titulo.
+    public static double AltoTitulo(string path)
+    {
+        Tif t = ReadInfoRaw(path);
+        int W = Math.Min(t.W, 4000), y0 = (int)(t.H * 0.75), H = t.H - y0;
+        if (H < 20) return 0;
+        bool[] m = new bool[W * H];
+        byte[] row = new byte[t.W * 4];
+        using (RowReader rr = new RowReader(t))
+            for (int y = 0; y < H; y++)
+            {
+                rr.ReadRow(y0 + y, row);
+                for (int x = 0; x < W; x++)
+                {
+                    int o = 4 * x;
+                    if (row[o] < 140 && row[o + 1] < 140 && row[o + 2] < 140) m[y * W + x] = true;   // (negro puro incluido)
+                }
+                // fuera los tramos horizontales largos (subrayado del titulo, lineas): no son letras
+                int run = 0;
+                for (int x = 0; x <= W; x++)
+                {
+                    if (x < W && m[y * W + x]) { run++; continue; }
+                    if (run > 300) for (int k = x - run; k < x; k++) m[y * W + k] = false;
+                    run = 0;
+                }
+            }
+        // componentes conexas (letras): alto y ancho de cada una
+        int[] stack = new int[W * H];
+        List<int> altos = new List<int>();
+        for (int i = 0; i < m.Length; i++)
+        {
+            if (!m[i]) continue;
+            int sp = 0; stack[sp++] = i; m[i] = false;
+            int minx = int.MaxValue, maxx = -1, miny = int.MaxValue, maxy = -1, n = 0;
+            while (sp > 0)
+            {
+                int k = stack[--sp]; int x = k % W, y = k / W; n++;
+                if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y;
+                if (x > 0 && m[k - 1]) { m[k - 1] = false; stack[sp++] = k - 1; }
+                if (x < W - 1 && m[k + 1]) { m[k + 1] = false; stack[sp++] = k + 1; }
+                if (y > 0 && m[k - W]) { m[k - W] = false; stack[sp++] = k - W; }
+                if (y < H - 1 && m[k + W]) { m[k + W] = false; stack[sp++] = k + W; }
+            }
+            int h = maxy - miny + 1, w = maxx - minx + 1;
+            if (h >= 20 && h <= 400 && w <= 1.6 * h && w >= 0.15 * h) altos.Add(h);
+        }
+        if (altos.Count < 4) return 0;
+        altos.Sort();
+        // letras mayusculas del titulo: mediana de las 6 mas altas (descarta el circulo y ruido)
+        int c = altos.Count, k6 = Math.Min(6, c);
+        return 0.5 * (altos[c - k6 + (k6 - 1) / 2] + altos[c - k6 + k6 / 2]);
+    }
+
+    // Ancho (px) de la linea de corte roja (para comparar un "CCL" con su "LC"). 0 = sin rojo.
+    public static int AnchoRojo(string path)
+    {
+        Tif t = ReadInfoRaw(path);
+        byte[] row = new byte[t.W * 4];
+        int x0 = int.MaxValue, x1 = -1;
+        using (RowReader rr = new RowReader(t))
+            for (int y = 0; y < t.H; y++)
+            {
+                rr.ReadRow(y, row);
+                for (int x = 0; x < t.W; x++)
+                {
+                    int o = 4 * x;
+                    if (row[o] > 180 && row[o + 1] < 80 && row[o + 2] < 80) { if (x < x0) x0 = x; if (x > x1) x1 = x; }
+                }
+            }
+        return x1 >= x0 ? x1 - x0 : 0;
+    }
+    public static int AnchoPx(string path) { return ReadInfoRaw(path).W; }
     public static int Medida(string path)
     {
         double e = Escala, p = PxSinGeo;
@@ -102,6 +179,14 @@ public static class CNPrep
         return r;
     }
 
+    // lee la cabecera sin exigir escala (para medir la imagen)
+    static Tif ReadInfoRaw(string path)
+    {
+        double e = Escala, p = PxSinGeo; int n = SinGeo.Count;
+        try { Escala = 0; PxSinGeo = 0.001; return ReadInfo(path); }
+        finally { Escala = e; PxSinGeo = p; while (SinGeo.Count > n) SinGeo.RemoveAt(SinGeo.Count - 1); }
+    }
+
     public static Tif ReadInfo(string path)
     {
         Tif t = new Tif(); t.Path = path;
@@ -163,6 +248,8 @@ public static class CNPrep
             UltimaMedida = UltimosPpp > 1 ? 1 : 2;
             double dpi = t.Dpi > 1 ? (t.ResUnit == 3 ? t.Dpi * 2.54 : t.Dpi) : 0;
             double px = (dpi > 1 && Escala > 0) ? 0.0254 / dpi * Escala : PxSinGeo;
+            double pxArch;
+            if (PxPorArchivo.TryGetValue(System.IO.Path.GetFullPath(path).ToLowerInvariant(), out pxArch) && pxArch > 0) px = pxArch;
             if (px <= 0) throw new Exception("El TIFF no trae georreferencia ni resolucion (ppp): no se puede saber su escala. " + System.IO.Path.GetFileName(path));
             t.Sx = t.Sy = px; t.U0 = 0; t.V0 = t.H * px; t.Geo = true;
             string av = System.IO.Path.GetFileName(path) + ": sin georreferencia; escala por " + (dpi > 1 ? ((int)Math.Round(dpi)) + " ppp a 1:" + Escala : "pixel elegido") + " = pixel " + (px * 1000).ToString("0.##", CultureInfo.InvariantCulture) + " mm";
@@ -553,7 +640,8 @@ public static class CNPrep
     static Tile[] PrepareCached(Img im, string pngDir, double px, int maxPx)
     {
         FileInfo fi = new FileInfo(im.Path);
-        string key = fi.Length + "|" + fi.LastWriteTimeUtc.Ticks + "|" + px.ToString("R", CultureInfo.InvariantCulture) + "|" + maxPx + "|v2|" + Escala.ToString("R", CultureInfo.InvariantCulture) + "|" + PxSinGeo.ToString("R", CultureInfo.InvariantCulture);
+        string key = fi.Length + "|" + fi.LastWriteTimeUtc.Ticks + "|" + px.ToString("R", CultureInfo.InvariantCulture) + "|" + maxPx + "|v2|" + Escala.ToString("R", CultureInfo.InvariantCulture) + "|" + PxSinGeo.ToString("R", CultureInfo.InvariantCulture)
+            + "|" + (PxPorArchivo.ContainsKey(System.IO.Path.GetFullPath(im.Path).ToLowerInvariant()) ? PxPorArchivo[System.IO.Path.GetFullPath(im.Path).ToLowerInvariant()].ToString("R", CultureInfo.InvariantCulture) : "-");
         string side = Path.Combine(pngDir, im.Name + ".info.txt");
         if (File.Exists(side))
         {
