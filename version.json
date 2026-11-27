@@ -1,10 +1,10 @@
 {
- "version": "2026.11.27.2",
- "fecha": "2026-11-27 11:51",
- "notas": "Cada corte es UNA sola imagen por fila (vinculada, calidad completa, escala exacta 1:1 en metros); los PNG quedan junto al DWG en CORTES DWG y deben ir siempre con el DWG.",
+ "version": "2026.11.27.3",
+ "fecha": "2026-11-27 11:52",
+ "notas": "LEEME: los PNG deben ir siempre junto al DWG.",
  "min_lanzador": 1,
  "archivos": {
   "GENERADOR_DE_CORTES.bat": "fabca3015ba7eef262bcb037be64869bd6baf3935a26a25d7fe389d55918bac3",
-  "LEEME_CORTES_REVIT.txt": "a2579280918fb26c2ba1cbec383c67cb51e8f347b43c257a7dc9c4d7d47c6d60"
+  "LEEME_CORTES_REVIT.txt": "e68c2e0e66193b9d089cbd53681c4b1d4e350a8f2bdc3b3914a651ccccf0f456"
  }
 }
